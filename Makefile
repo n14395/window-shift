@@ -2,8 +2,10 @@ APP_NAME = WindowShift
 BUNDLE_ID = dev.nwf.WindowShift
 BUILD_DIR = .build/release
 APP = dist/$(APP_NAME).app
+VERSION := $(shell /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist 2>/dev/null || echo 0.0.0)
+DMG = dist/$(APP_NAME)-$(VERSION).dmg
 
-all: app
+all: app dmg
 
 build:
 	swift build -c release
@@ -27,10 +29,21 @@ else
 endif
 	@echo "Built $(APP) (signed: $(or $(IDENTITY),ad-hoc+pinned-requirement))"
 
-run: app
+# Distributable disk image: the app plus an /Applications symlink for
+# drag-install, compressed (UDZO). Rebuilt on every build.
+dmg: app
+	rm -f dist/$(APP_NAME)-*.dmg
+	STAGING=$$(mktemp -d) && \
+	cp -R $(APP) $$STAGING/ && \
+	ln -s /Applications $$STAGING/Applications && \
+	hdiutil create -quiet -volname $(APP_NAME) -srcfolder $$STAGING -ov -format UDZO $(DMG) && \
+	rm -rf $$STAGING
+	@echo "Built $(DMG)"
+
+run: all
 	open $(APP)
 
 clean:
 	rm -rf .build dist
 
-.PHONY: all build app run clean
+.PHONY: all build app dmg run clean

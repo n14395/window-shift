@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build WindowShift.app without Xcode (SwiftPM + manual bundle assembly).
-#   ./build.sh         build dist/WindowShift.app
-#   ./build.sh run     build and launch it
+#   ./build.sh         build dist/WindowShift.app + dist/WindowShift-<ver>.dmg
+#   ./build.sh run     build and launch the app
 #   ./build.sh clean   remove build products
 set -eu
 cd "$(dirname "$0")"
@@ -40,6 +40,18 @@ else
         --requirements '=designated => identifier "'"$BUNDLE_ID"'"' "$APP"
 fi
 echo "Built $APP (signed: ${IDENTITY:-ad-hoc+pinned-requirement})"
+
+# Distributable disk image: the app plus an /Applications symlink for
+# drag-install, compressed (UDZO). Rebuilt on every build.
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist 2>/dev/null || echo 0.0.0)
+DMG="dist/$APP_NAME-$VERSION.dmg"
+rm -f dist/"$APP_NAME"-*.dmg
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+cp -R "$APP" "$STAGING/"
+ln -s /Applications "$STAGING/Applications"
+hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG"
+echo "Built $DMG"
 
 if [ "${1:-}" = "run" ]; then
     open "$APP"

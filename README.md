@@ -30,9 +30,17 @@ handoff engages (tiling armed at the cursor).
 Three equivalent ways to build:
 
 ```sh
-make run          # Makefile: builds dist/WindowShift.app and opens it
+make run          # Makefile: builds dist/WindowShift.app (+ .dmg) and opens it
 ./build.sh run    # plain shell script, same result (also: clean)
 ```
+
+Every build also produces `dist/WindowShift-<version>.dmg` (the app plus an
+/Applications drag-install symlink), ready to attach to a GitHub release.
+Note for distribution: the build is signed with an Apple Development
+certificate and is **not notarized**, so on other Macs Gatekeeper will balk
+on first launch — recipients need right-click > Open (twice, on newer
+macOS), or `xattr -d com.apple.quarantine`. Proper public distribution
+would need a Developer ID certificate + notarization.
 
 or open `WindowShift.xcodeproj` in Xcode 16+ (the target uses a synchronized
 folder reference to `Sources/WindowShift`, so new source files are picked up
