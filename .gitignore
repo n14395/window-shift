@@ -1,0 +1,14 @@
+# Build output
+/.build/
+/dist/
+
+# Xcode / SwiftPM per-user state
+xcuserdata/
+.swiftpm/
+DerivedData/
+
+# Finder
+.DS_Store
+
+# Local assistant settings stay out of the repo
+.claude/
