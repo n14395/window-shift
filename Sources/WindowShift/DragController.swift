@@ -41,6 +41,9 @@ final class DragController {
         // For Esc-cancel: the window and its pre-drag frame to restore.
         let element: AXUIElement
         let originalFrame: CGRect
+        // Neighbor window frames snapshotted at grab time, for magnetic
+        // window-to-window snapping (empty when the feature is off).
+        let neighbors: [CGRect]
         // The last event location we emitted — the session pointer. A
         // cancel's synthetic mouse-up must end the session exactly there.
         var lastAligned: CGPoint
@@ -253,14 +256,19 @@ final class DragController {
                     break
                 }
             }
-            let aligned = location + grab.offset * grab.ease
+            var aligned = location + grab.offset * grab.ease
             if grab.ease > 0 {
                 // The grab point (traffic-light gap) sits far from the cursor,
                 // so the session pointer could enter a snap zone while the
                 // cursor is mid-screen. Keep it clamped to the display
                 // interior — zones must only ever trigger at the cursor.
-                return clampToDisplayInterior(aligned, near: location,
-                                              inset: prox * 1.5, edges: grab.handoffEdges)
+                aligned = clampToDisplayInterior(aligned, near: location,
+                                                inset: prox * 1.5, edges: grab.handoffEdges)
+            }
+            // Magnetic window-to-window snapping, only while fully outside
+            // the handoff ramp — inside it, tiling owns the pointer.
+            if target == 1 {
+                aligned = aligned + magneticDelta(pointer: aligned, grab: grab)
             }
             return aligned
         case .warp:
@@ -268,14 +276,81 @@ final class DragController {
             // carry hand-relative coordinates; during the first instant of
             // the drag, translate anything closer to the pre-warp cursor
             // position than to the grab point.
+            var pointer = location
             if Date().timeIntervalSince(grab.startedAt) < 0.1 {
                 let preWarpCursor = grab.point - grab.offset
                 if location.distance(to: preWarpCursor) < location.distance(to: grab.point) {
-                    return location + grab.offset
+                    pointer = location + grab.offset
                 }
             }
-            return location
+            // Magnetic snapping away from zone-bearing edges (there, tiling
+            // owns the pointer).
+            if !nearCommitEdge(pointer, edges: grab.handoffEdges, margin: 60) {
+                pointer = pointer + magneticDelta(pointer: pointer, grab: grab)
+            }
+            return pointer
         }
+    }
+
+    // MARK: - Magnetic window-to-window snapping
+
+    /// Pointer nudge that brings the dragged window's edges into
+    /// abutment/alignment with a neighbor's edges, when within the snap
+    /// distance. Stateless per event: the delta appears while the prospective
+    /// (unsnapped) frame is within range and vanishes once the hand pulls
+    /// past it — which is the classic magnetic feel.
+    private func magneticDelta(pointer: CGPoint, grab: Grab) -> CGVector {
+        let distance = config.magneticSnapDistance
+        guard distance > 0, !grab.isResize, !grab.neighbors.isEmpty else { return .zero }
+        // The session keeps the grip offset constant, so the window's frame
+        // tracks the pointer's total displacement from the grab point.
+        let f = grab.originalFrame.offsetBy(dx: pointer.x - grab.point.x,
+                                            dy: pointer.y - grab.point.y)
+        var bestDX = CGFloat.infinity
+        var bestDY = CGFloat.infinity
+        for n in grab.neighbors {
+            // Snap an axis only when the windows are adjacent on the other
+            // axis (ranges overlap, or gap within the snap distance) — never
+            // to far-away windows across the screen.
+            let yNear = f.minY < n.maxY + distance && f.maxY > n.minY - distance
+            let xNear = f.minX < n.maxX + distance && f.maxX > n.minX - distance
+            if yNear {
+                for d in [n.maxX - f.minX,   // abut: our left edge to their right
+                          n.minX - f.maxX,   // abut: our right edge to their left
+                          n.minX - f.minX,   // align left edges
+                          n.maxX - f.maxX]   // align right edges
+                where abs(d) <= distance && abs(d) < abs(bestDX) { bestDX = d }
+            }
+            if xNear {
+                for d in [n.maxY - f.minY, n.minY - f.maxY,
+                          n.minY - f.minY, n.maxY - f.maxY]
+                where abs(d) <= distance && abs(d) < abs(bestDY) { bestDY = d }
+            }
+        }
+        return CGVector(dx: bestDX.isFinite ? bestDX : 0,
+                        dy: bestDY.isFinite ? bestDY : 0)
+    }
+
+    /// On-screen normal/floating windows other than the dragged one, capped
+    /// to bound the per-event arithmetic. Snapshotted once per drag.
+    private func neighborFrames(excluding target: TargetWindow) -> [CGRect] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+                as? [[String: Any]] else { return [] }
+        var rects: [CGRect] = []
+        for w in list {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer == 0 || layer == 3,
+                  let bd = w[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bd as CFDictionary),
+                  rect.width >= 40, rect.height >= 40 else { continue }
+            if let alpha = w[kCGWindowAlpha as String] as? Double, alpha <= 0.01 { continue }
+            if let pidNum = w[kCGWindowOwnerPID as String] as? NSNumber,
+               pid_t(pidNum.int32Value) == target.pid,
+               abs(rect.minX - target.frame.minX) < 2,
+               abs(rect.minY - target.frame.minY) < 2 { continue }   // the dragged window
+            rects.append(rect)
+            if rects.count >= 20 { break }
+        }
+        return rects
     }
 
     /// After the native session ends, return the cursor to where the user's
@@ -545,6 +620,8 @@ final class DragController {
         let name = appName(pid: target.pid)
         let snapApp = snapAppRunning()
         let tiling = nativeTilingSettings()
+        let neighbors = config.magneticSnapDistance > 0 && !isResize
+            ? neighborFrames(excluding: target) : []
         state = .pending(Grab(point: grabPoint, offset: offset, isResize: isResize,
                               mode: config.dragMode,
                               handoffEdges: HandoffEdges(top: tiling.top || snapApp,
@@ -552,6 +629,7 @@ final class DragController {
                                                          bottom: snapApp),
                               appName: name,
                               element: target.element, originalFrame: target.frame,
+                              neighbors: neighbors,
                               lastAligned: grabPoint))
         lastStatus = "grabbed a \(name) window"
         onDragActiveChanged?(true)

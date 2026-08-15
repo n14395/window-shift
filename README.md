@@ -15,6 +15,11 @@ WindowServer runs a **genuine title-bar drag**. That means:
 Right-drag resizes from the **corner nearest your click** (the window quadrant
 you grab), via a genuine native resize session on the window's resize border.
 
+Optional (off by default): **magnetic window-to-window snapping** — while
+moving, the dragged window's edges pull into abutment or alignment with
+nearby windows' edges (see `magneticSnapDistance` below, or the Magnetic
+Snap menu setting).
+
 With the modifier held, **double-left-click fills the screen** (the visible
 frame; double-click the filled window again to restore its previous size) and
 **double-right-click centers the window** (size unchanged). Double-click
@@ -110,6 +115,15 @@ defaults write dev.nwf.WindowShift edgeSnapProximity -float 30
 #                     Control is detected open (WindowManager overlay windows
 #                     at layers 14/19 — no extra permissions needed)
 defaults write dev.nwf.WindowShift handoffRelease -string "top-sticky"
+
+# Magnetic window-to-window snapping during move drags (0 = off, the
+# default). The dragged window's edges pull into abutment (edge meets edge)
+# or alignment (same edge lines up) with nearby windows' edges when within
+# this many px. Snapping only considers windows adjacent on the other axis,
+# only applies outside the tiling handoff ramp (tiling wins near screen
+# edges), and never applies to resize drags. Neighbor positions are
+# snapshotted when the drag starts.
+defaults write dev.nwf.WindowShift magneticSnapDistance -float 8
 
 # Distance below the window top where the synthetic title-bar grab lands (px)
 defaults write dev.nwf.WindowShift titleBarInset -float 4

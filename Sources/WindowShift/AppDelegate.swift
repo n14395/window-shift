@@ -30,8 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// `defaults write`) reloads the live config automatically.
     private static let observedKeys = [
         "enabled", "modifiers", "dragMode", "edgeSnapProximity", "handoffRelease",
-        "titleBarInset", "resizeInset", "trafficLightMargin", "disabledApps",
-        "showMenuBarIcon",
+        "magneticSnapDistance", "titleBarInset", "resizeInset", "trafficLightMargin",
+        "disabledApps", "showMenuBarIcon",
     ]
 
     private static let modifierChoices: [(title: String, name: String)] = [
@@ -175,6 +175,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             options: [
                 ("Off", "0"), ("Narrow (20 px)", "20"), ("Default (30 px)", "30"),
                 ("Wide (45 px)", "45"), ("Extra Wide (60 px)", "60"),
+            ]
+        )
+        addChoiceRow(
+            to: menu, title: "Magnetic Snap", symbol: "square.on.square",
+            description: "Pull the dragged window's edges into abutment or alignment with nearby windows' edges when they pass within this distance. Near screen edges the tiling handoff takes priority. Off by default.",
+            key: "magneticSnapDistance",
+            options: [
+                ("Off (default)", "0"), ("Subtle (5 px)", "5"),
+                ("Standard (8 px)", "8"), ("Strong (12 px)", "12"),
             ]
         )
         addChoiceRow(

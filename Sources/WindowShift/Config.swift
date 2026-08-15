@@ -34,6 +34,10 @@ struct Config {
     var modifierFlags: CGEventFlags
     var dragMode: DragMode
     var edgeSnapProximity: CGFloat
+    /// Magnetic window-to-window snapping during move drags: pull the dragged
+    /// window's edges into abutment/alignment with nearby windows' edges when
+    /// within this many px. 0 = off (the default).
+    var magneticSnapDistance: CGFloat
     var handoffRelease: HandoffRelease
     var titleBarInset: CGFloat
     var resizeInset: CGFloat
@@ -55,6 +59,7 @@ struct Config {
             "modifiers": "ctrl,cmd",
             "dragMode": "offset",
             "edgeSnapProximity": 30.0,
+            "magneticSnapDistance": 0.0,
             "handoffRelease": "top-sticky",
             "titleBarInset": 4.0,
             "resizeInset": 8.0,
@@ -77,6 +82,7 @@ struct Config {
             modifierFlags: flags,
             dragMode: mode,
             edgeSnapProximity: CGFloat(d.double(forKey: "edgeSnapProximity")),
+            magneticSnapDistance: CGFloat(d.double(forKey: "magneticSnapDistance")),
             handoffRelease: HandoffRelease(
                 rawValue: (d.string(forKey: "handoffRelease") ?? "top-sticky").lowercased()
             ) ?? .topSticky,
