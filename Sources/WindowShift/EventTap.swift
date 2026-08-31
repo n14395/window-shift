@@ -80,15 +80,32 @@ final class EventTap {
     /// thread; rapid repeated disables mean the Accessibility grant was
     /// revoked (WindowServer kills revoked taps) — surface that instead.
     func handleDisable() {
+        // The events of the gesture in flight — crucially its mouse-up — were
+        // never delivered while the tap was off, so the state machine would sit
+        // waiting for one forever and ignore every later drag. Start clean.
+        controller.resetGesture()
+
+        // Ask TCC rather than inferring from how often we were disabled: a busy
+        // machine can overrun the callback timeout several times in a row, and
+        // treating that as a revoked grant used to leave the tap switched off
+        // for good behind an alarming (and wrong) alert.
+        let revoked = !AXIsProcessTrusted()
         let now = Date()
         disableTimestamps.append(now)
         disableTimestamps.removeAll { now.timeIntervalSince($0) > 2.0 }
-        let revoked = disableTimestamps.count >= 3
+        // Still rate-limit: a tap that is disabled the instant we re-enable it
+        // would otherwise spin.
+        let flapping = disableTimestamps.count >= 8
 
         guard let tap else { return }
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
             if revoked {
                 NotificationCenter.default.post(name: Self.permissionLostNotification, object: nil)
+            } else if flapping {
+                self?.disableTimestamps.removeAll()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
             } else {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
@@ -126,6 +143,7 @@ private func windowShiftKeyTapCallback(
     let eventTap = Unmanaged<EventTap>.fromOpaque(refcon).takeUnretainedValue()
 
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        eventTap.controller.resetGesture()
         return nil   // re-armed at the next gesture via onDragActiveChanged
     }
     if type == .keyDown,

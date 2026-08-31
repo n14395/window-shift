@@ -12,3 +12,6 @@ DerivedData/
 
 # Local assistant settings stay out of the repo
 .claude/
+
+# build.sh output (.app / .dmg)
+build/

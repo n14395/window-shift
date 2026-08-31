@@ -10,8 +10,23 @@ struct TargetWindow {
     let frame: CGRect
 }
 
+/// One on-screen window as the window server sees it. Cheap to gather in bulk
+/// and pure arithmetic to query, so a gesture takes ONE scan and reuses it.
+struct WindowSnapshot {
+    let id: CGWindowID
+    let pid: pid_t
+    let layer: Int
+    let bounds: CGRect
+}
+
 enum WindowResolver {
     private static let systemWide = AXUIElementCreateSystemWide()
+
+    /// Window-server artifacts (drag shadows, tiling-zone previews) sit just
+    /// below the maximum window level — measured at maximumWindow − 1. Nothing
+    /// an app can legitimately create lives anywhere near here, so a small band
+    /// below the ceiling is a safe thing to ignore wholesale.
+    private static let artifactLevelFloor = Int(CGWindowLevelForKey(.maximumWindow)) - 8
 
     /// Every AX call below runs INSIDE the event-tap callback, where the whole
     /// session's mouse delivery waits on our verdict. The default AX messaging
@@ -25,40 +40,78 @@ enum WindowResolver {
         AXUIElementSetMessagingTimeout(systemWide, 0.25)
     }()
 
-    /// Cheap, non-blocking pre-check via the window server (never talks to the
-    /// target app): the topmost on-screen window under `point`, front-to-back.
-    /// Lets the tap skip menubar items, overlays and HUD panels with zero AX
-    /// traffic — those clicks pass straight through to their owners.
-    static func topWindowInfo(at point: CGPoint) -> (pid: pid_t, layer: Int, bundleID: String?)? {
+    /// Every on-screen window, front-to-back, via the window server (never
+    /// talks to the target app). One scan per gesture, reused for the
+    /// topmost-window gate and for magnetic-snap neighbours.
+    static func onScreenWindows() -> [WindowSnapshot] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
-                as? [[String: Any]] else { return nil }
-        let display = displayBounds(containing: point)
+                as? [[String: Any]] else { return [] }
+        var out: [WindowSnapshot] = []
+        out.reserveCapacity(list.count)
         for w in list {   // front-to-back
             guard let bd = w[kCGWindowBounds as String] as? [String: Any],
                   let rect = CGRect(dictionaryRepresentation: bd as CFDictionary),
-                  rect.contains(point),
                   let pidNum = w[kCGWindowOwnerPID as String] as? NSNumber,
-                  let layer = w[kCGWindowLayer as String] as? Int else { continue }
+                  let layer = w[kCGWindowLayer as String] as? Int,
+                  let number = w[kCGWindowNumber as String] as? NSNumber else { continue }
             if let alpha = w[kCGWindowAlpha as String] as? Double, alpha <= 0.01 { continue }
+            out.append(WindowSnapshot(id: CGWindowID(number.uint32Value),
+                                      pid: pid_t(pidNum.int32Value),
+                                      layer: layer, bounds: rect))
+        }
+        return out
+    }
+
+    /// The topmost window under `point` in a snapshot. Lets the tap skip
+    /// menubar items, overlays and HUD panels with zero AX traffic — those
+    /// clicks pass straight through to their owners.
+    static func topWindow(at point: CGPoint, in windows: [WindowSnapshot]) -> WindowSnapshot? {
+        let display = displayBounds(containing: point)
+        // Half-point outset: a point exactly on a window's edge belongs to it.
+        for w in windows where w.bounds.insetBy(dx: -0.5, dy: -0.5).contains(point) {
             // Display-covering windows at non-normal levels are passive
             // click-through overlays (Magnet keeps a resident full-screen
             // snap-preview window at status level 25; notch/annotation
             // utilities do the like). The window server hit-tests past them,
             // so this gate must look past them too or every click on screen
             // gets misattributed to the overlay.
-            if layer != 0, layer != 3, let display,
-               rect.contains(display.insetBy(dx: 1, dy: 1)) { continue }
-            let pid = pid_t(pidNum.int32Value)
-            return (pid, layer, NSRunningApplication(processIdentifier: pid)?.bundleIdentifier)
+            if w.layer != 0, w.layer != 3, let display,
+               w.bounds.contains(display.insetBy(dx: 1, dy: 1)) { continue }
+            // Window-server artifacts — drag shadows, tiling-zone previews (which
+            // appear whenever Option is held, so any combo containing it sees
+            // them) — sit at the maximum window level and linger for a moment
+            // after the drag that spawned them. They are not click targets, and
+            // treating one as the topmost window declines the next gesture.
+            if w.layer >= Self.artifactLevelFloor { continue }
+            return w
         }
         return nil
     }
 
-    private static func displayBounds(containing p: CGPoint) -> CGRect? {
+    static func displayBounds(containing p: CGPoint) -> CGRect? {
         var display: CGDirectDisplayID = 0
         var count: UInt32 = 0
         guard CGGetDisplaysWithPoint(p, 1, &display, &count) == .success, count > 0 else { return nil }
         return CGDisplayBounds(display)
+    }
+
+    /// Whether `p` lies on SOME active display. The desktop is a union of
+    /// display rectangles, not one rectangle: displays at different vertical
+    /// offsets leave uncovered "staircase" gaps INSIDE the bounding box, and
+    /// the window server hit-tests nothing there. A synthetic mouse-down at
+    /// such a point starts no drag session — so every grab point must pass
+    /// this test. (Testing the sign of a coordinate is NOT equivalent: a
+    /// display left of the main one has legitimately negative x.)
+    static func onAnyDisplay(_ p: CGPoint) -> Bool {
+        var count: UInt32 = 0
+        return CGGetDisplaysWithPoint(p, 0, nil, &count) == .success && count > 0
+    }
+
+    /// The window server's current bounds for one window, by ID.
+    static func liveBounds(of id: CGWindowID) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
+              let bd = list.first?[kCGWindowBounds as String] as? [String: Any] else { return nil }
+        return CGRect(dictionaryRepresentation: bd as CFDictionary)
     }
 
     /// Hit-test the AX hierarchy at a point (CG global coords) and resolve the
@@ -102,80 +155,6 @@ enum WindowResolver {
         return nil
     }
 
-    /// The universally-safe grab spot: the midpoint of the gap between the
-    /// close (red) and minimize (yellow) traffic-light buttons, read from the
-    /// window's own AX button geometry — window chrome in effectively every
-    /// app, and never overlapped by tab strips or toolbar controls. Returns
-    /// nil when the window doesn't expose plausible button frames.
-    static func trafficLightGapPoint(of window: AXUIElement, frame windowFrame: CGRect) -> CGPoint? {
-        guard let close = buttonFrame(of: window, attribute: kAXCloseButtonAttribute as String),
-              let minimize = buttonFrame(of: window, attribute: kAXMinimizeButtonAttribute as String)
-        else { return nil }
-        let gapLeft = close.maxX
-        let gapRight = minimize.minX
-        guard gapRight - gapLeft >= 4,                      // a real gap to aim at
-              close.width > 2, close.height > 2,           // buttons actually laid out
-              close.minY >= windowFrame.minY - 1,          // in this window's top region
-              close.midY - windowFrame.minY < 80,
-              gapLeft > windowFrame.minX,
-              gapRight < windowFrame.minX + 200
-        else { return nil }
-        return CGPoint(x: (gapLeft + gapRight) / 2, y: close.midY)
-    }
-
-    private static func buttonFrame(of window: AXUIElement, attribute: String) -> CGRect? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, attribute as CFString, &ref) == .success,
-              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
-        return frame(of: (ref as! AXUIElement))
-    }
-
-    /// True if the point hit-tests to empty draggable chrome of `window`: the
-    /// window itself, or a non-interactive container (title bar background,
-    /// tab-bar filler, toolbar background — all of which drag the window).
-    /// Anything on the path from the hit element up to the window that has a
-    /// control-like role or supports AXPress — a tab, traffic-light button,
-    /// toolbar control, text field — makes the point unsafe to grab: a click
-    /// there would activate the control (or tear off the tab) instead of
-    /// starting a window drag.
-    static func isSafeDragPoint(_ point: CGPoint, in window: AXUIElement,
-                                deadline: Date = Date().addingTimeInterval(0.3)) -> Bool {
-        var hitRef: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &hitRef) == .success,
-              let hit = hitRef else { return false }
-        if CFEqual(hit, window) { return true }
-        guard let hitWindow = containingWindow(of: hit, deadline: deadline),
-              CFEqual(hitWindow, window) else { return false }
-
-        var current: AXUIElement? = hit
-        for _ in 0..<8 {
-            guard let el = current else { return false }
-            if CFEqual(el, window) { return true }
-            if let r = role(of: el), controlRoles.contains(r) { return false }
-            var actionsRef: CFArray?
-            if AXUIElementCopyActionNames(el, &actionsRef) == .success,
-               let actions = actionsRef as? [String],
-               actions.contains(kAXPressAction) {
-                return false
-            }
-            current = parent(of: el)
-        }
-        return false
-    }
-
-    private static let controlRoles: Set<String> = [
-        kAXButtonRole, kAXRadioButtonRole, kAXCheckBoxRole, kAXPopUpButtonRole,
-        kAXMenuButtonRole, kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole,
-        kAXSliderRole, kAXScrollBarRole, kAXDisclosureTriangleRole,
-    ]
-
-    private static func parent(of element: AXUIElement) -> AXUIElement? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &ref) == .success,
-              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
-        return (ref as! AXUIElement)
-    }
-
     private static func role(of element: AXUIElement) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success else {
@@ -196,6 +175,13 @@ enum WindowResolver {
         guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
               AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
         return CGRect(origin: pos, size: size)
+    }
+
+    @discardableResult
+    static func setOrigin(_ origin: CGPoint, of window: AXUIElement) -> Bool {
+        var o = origin
+        guard let value = AXValueCreate(.cgPoint, &o) else { return false }
+        return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value) == .success
     }
 
     /// Restore a window's frame (cancelled drags): position first, then size,

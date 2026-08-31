@@ -16,6 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var conflictItem: NSMenuItem!
     private let loginRow = SettingRowView(title: "Launch at Login", symbol: "power")
     private let hideIconRow = SettingRowView(title: "Hide Menu Bar Icon", symbol: "eye.slash")
+    private let screenRecordingRow = SettingRowView(title: "Grant Screen Recording",
+                                                    symbol: "rectangle.dashed.badge.record")
+    private var screenRecordingItem: NSMenuItem!
     private let footerRow = AboutQuitRowView()
     private var iconVisibilityObservation: NSKeyValueObservation?
     private let settingsHeader = SectionHeaderView(title: "Settings", collapsible: true)
@@ -23,14 +26,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsExpanded = false
     // Choice submenus: defaults key -> (option row, encoded value)
     private var choiceRows: [String: [(row: OptionRowView, value: String)]] = [:]
-    private let stringChoiceKeys: Set<String> = ["dragMode", "handoffRelease"]
     private let disabledAppsMenu = NSMenu()
 
     /// Defaults keys the app observes; any change (menu or external
     /// `defaults write`) reloads the live config automatically.
     private static let observedKeys = [
-        "enabled", "modifiers", "dragMode", "edgeSnapProximity", "handoffRelease",
-        "magneticSnapDistance", "titleBarInset", "resizeInset", "trafficLightMargin",
+        "enabled", "modifiers", "magneticSnapDistance", "resizeInset",
         "disabledApps", "showMenuBarIcon",
     ]
 
@@ -44,8 +45,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: ["enabled": true, "showMenuBarIcon": true])
-        // One-time cleanup of keys left behind by removed features.
-        UserDefaults.standard.removeObject(forKey: "perAppGrabX")
+        // One-time cleanup of keys left behind by removed features. The
+        // handoff/title-bar settings went with the move mechanism they tuned:
+        // the drag is bound to a window ID now, so there is no grab offset to
+        // reconcile and no title bar to aim at.
+        for dead in ["perAppGrabX", "dragMode", "edgeSnapProximity", "handoffRelease",
+                     "titleBarInset", "trafficLightMargin"] {
+            UserDefaults.standard.removeObject(forKey: dead)
+        }
         controller.enabled = UserDefaults.standard.bool(forKey: "enabled")
 
         setupStatusItem()
@@ -57,6 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         Permissions.waitUntilTrusted { [weak self] in
             self?.startTap()
+            // Ask once, now that the app is otherwise ready. Declining is
+            // survivable — moves fall back to Accessibility — and the menu
+            // keeps an entry for granting it later.
+            if SkyLight.available, !Permissions.screenRecordingGranted {
+                Permissions.requestScreenRecording()
+            }
         }
         if !Permissions.trusted {
             captionView.setText("Waiting for Accessibility permission…")
@@ -149,68 +162,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsItems.append(hideIconItem)
         menu.addItem(hideIconItem)
 
-        addChoiceRow(
-            to: menu, title: "Edge Handoff", symbol: "rectangle.lefthalf.filled",
-            description: "How the drag realigns after edge tiling engages: keep the collapsed grab for the rest of the drag, keep it only when engaged at the top edge, or release it and re-collapse whenever Mission Control is open.",
-            key: "handoffRelease",
-            options: [
-                ("Sticky at Top Edge (default)", "top-sticky"),
-                ("Sticky for Whole Drag", "sticky"),
-                ("Release + Track Mission Control", "mission-control"),
-            ]
-        )
-        addChoiceRow(
-            to: menu, title: "Drag Mode", symbol: "cursorarrow.motionlines",
-            description: "Offset keeps the cursor where you grabbed and hands off near edges. Warp jumps the cursor to the grab point for the whole drag, making every tiling interaction exact.",
-            key: "dragMode",
-            options: [
-                ("Offset — Cursor Stays Put (default)", "offset"),
-                ("Warp — Cursor Jumps to Grab Point", "warp"),
-            ]
-        )
-        addChoiceRow(
-            to: menu, title: "Handoff Distance", symbol: "ruler",
-            description: "How close the cursor must get to a screen edge before the drag hands off, so native tiling tracks the cursor exactly. Off disables the handoff entirely.",
-            key: "edgeSnapProximity",
-            options: [
-                ("Off", "0"), ("Narrow (20 px)", "20"), ("Default (30 px)", "30"),
-                ("Wide (45 px)", "45"), ("Extra Wide (60 px)", "60"),
-            ]
-        )
-        addChoiceRow(
-            to: menu, title: "Magnetic Snap", symbol: "square.on.square",
-            description: "Pull the dragged window's edges into abutment or alignment with nearby windows' edges when they pass within this distance. Near screen edges the tiling handoff takes priority. Off by default.",
-            key: "magneticSnapDistance",
-            options: [
-                ("Off (default)", "0"), ("Subtle (5 px)", "5"),
-                ("Standard (8 px)", "8"), ("Strong (12 px)", "12"),
-            ]
-        )
-        addChoiceRow(
-            to: menu, title: "Title Bar Inset", symbol: "arrow.down.to.line",
-            description: "How far below the window's top edge the synthetic grab lands when the traffic-light gap isn't available (fallback grab paths only).",
-            key: "titleBarInset",
-            options: [
-                ("2 px", "2"), ("4 px (default)", "4"), ("8 px", "8"),
-                ("12 px", "12"), ("16 px", "16"),
-            ]
-        )
-        addChoiceRow(
-            to: menu, title: "Resize Corner Inset", symbol: "arrow.up.left.and.arrow.down.right",
-            description: "How far inside the window corner right-drag resizes grab. Increase for apps with large rounded corners (e.g. Safari) where clicks land in the transparent halo.",
-            key: "resizeInset",
-            options: [
-                ("4 px", "4"), ("8 px (default)", "8"), ("12 px", "12"), ("16 px", "16"),
-            ]
-        )
-        addChoiceRow(
-            to: menu, title: "Traffic Light Margin", symbol: "circle.dashed",
-            description: "Keep-clear distance from the window's left edge, used by the fallback grab paths to avoid the close/minimize/zoom buttons.",
-            key: "trafficLightMargin",
-            options: [
-                ("60 px", "60"), ("90 px (default)", "90"), ("120 px", "120"),
-            ]
-        )
+        // Shown only while the grant is missing. Not filed under Settings: it
+        // is not a preference, it is the difference between moves that tile and
+        // moves that do not.
+        screenRecordingRow.onClick = { [weak self] in
+            Permissions.requestScreenRecording()
+            self?.controller.reloadConfig()   // re-arm the drag path
+        }
+        screenRecordingItem = viewItem(screenRecordingRow)
+        menu.addItem(screenRecordingItem)
 
         let disabledRow = SettingRowView(title: "Disabled Apps", symbol: "nosign", showsSubmenuChevron: true)
         let disabledItem = viewItem(disabledRow)
@@ -274,6 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Collapsed by default on every open.
         settingsExpanded = false
         applySettingsCollapse()
+        Permissions.refreshScreenRecording()
         rebuildDisabledAppsMenu()
         if let status = controller.lastStatus {
             lastDragView.setText("Last drag: \(status)", color: .tertiaryLabelColor)
@@ -336,8 +297,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var caption = "\(config.modifierDescription) + left-drag moves the window, "
                 + "right-drag resizes it. Double-click fills the screen, "
                 + "right-double-click centers. Esc cancels a drag."
-            if !DragController.windowManagerFlag("EnableTilingByEdgeDrag"),
-               !DragController.windowManagerFlag("EnableTopTilingByEdgeDrag") {
+            if SkyLight.available, !Permissions.screenRecordingGranted {
+                caption += " Grant Screen Recording for real drag sessions — without it"
+                    + " windows still move, but nothing tiles or snaps. Nothing is ever"
+                    + " recorded: it is the permission macOS checks before one app may"
+                    + " drag another's windows."
+            } else if !SkyLight.available {
+                caption += " Warning: this macOS no longer offers the window-server drag"
+                    + " call WindowShift uses, so windows move without tiling or snapping."
+            } else if !DragController.windowManagerFlag("EnableTilingByEdgeDrag"),
+                      !DragController.windowManagerFlag("EnableTopTilingByEdgeDrag") {
                 caption += " Note: native drag-tiling is off in System Settings > Desktop & Dock."
             }
             captionView.setText(caption)
@@ -348,16 +317,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             chip.isOnChip = config.modifierFlags.contains(flag)
         }
         loginRow.isOn = SMAppService.mainApp.status == .enabled
+        screenRecordingItem?.isHidden =
+            !SkyLight.available || (Permissions.screenRecordingGranted && !controller.dragSessionsRefused)
         for (key, rows) in choiceRows {
-            let current: String
-            if stringChoiceKeys.contains(key) {
-                current = key == "dragMode" ? config.dragMode.rawValue : config.handoffRelease.rawValue
-                for entry in rows { entry.row.isSelected = entry.value == current }
-            } else {
-                let value = UserDefaults.standard.double(forKey: key)
-                for entry in rows {
-                    entry.row.isSelected = abs((Double(entry.value) ?? .nan) - value) < 0.01
-                }
+            let value = UserDefaults.standard.double(forKey: key)
+            for entry in rows {
+                entry.row.isSelected = abs((Double(entry.value) ?? .nan) - value) < 0.01
             }
         }
     }
@@ -384,11 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     private func applyChoice(key: String, value: String) {
-        if stringChoiceKeys.contains(key) {
-            UserDefaults.standard.set(value, forKey: key)
-        } else {
-            UserDefaults.standard.set(Double(value) ?? 0, forKey: key)
-        }
+        UserDefaults.standard.set(Double(value) ?? 0, forKey: key)
         controller.reloadConfig()
         refreshMenuState()
     }

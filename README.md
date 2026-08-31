@@ -4,14 +4,16 @@
 
 Hold a modifier combo, then left-drag anywhere in a window to move it, or
 right-drag to resize it — like alt-drag on Linux desktops. Unlike utilities
-that reposition windows through the Accessibility API, WindowShift rewrites
-the intercepted mouse events in flight so the WindowServer runs a **genuine
-title-bar drag**. Everything that hooks into real drags just works:
+that reposition windows through the Accessibility API, WindowShift asks the
+window server to run a **genuine drag session** on the window itself.
+Everything that hooks into real drags just works:
 
 - macOS built-in edge tiling (drag to a screen edge, macOS 15+)
 - macOS "hold ⌥ while dragging to tile"
 - Third-party snap-on-drag apps: Magnet, Rectangle, BetterTouchTool, Loop
 - Native drag speed (no per-frame IPC), and the cursor never warps
+- Works on any window — including ones whose title bar is crowded with tabs
+  and toolbar controls, or parked off-screen entirely
 
 <!-- TODO: demo GIF — drag from window body → native tile preview → Esc cancel -->
 
@@ -28,8 +30,7 @@ Default modifier combo: **⌃⌘** (configurable).
 | **Esc** during a drag | Cancel: the session ends and the window returns to its original frame — even undoing a snap that already committed |
 | extra modifier on top of the combo | Bypass WindowShift for that click — it reaches the app untouched |
 
-On haptic trackpads, a subtle tick marks the moment edge handoff engages
-(tiling armed at the cursor). Double-click speed follows your system setting.
+Double-click speed follows your system setting.
 
 Optional, off by default: **magnetic window-to-window snapping** — while
 moving, the dragged window's edges pull into abutment or alignment with
@@ -39,8 +40,15 @@ via `magneticSnapDistance` below.
 ## Installation
 
 Download the `.dmg` from [Releases](../../releases), drag WindowShift to
-Applications, and launch it. Grant **Accessibility** permission when prompted
-(System Settings → Privacy & Security → Accessibility).
+Applications, and launch it. Grant two permissions when prompted (both under
+System Settings → Privacy & Security):
+
+- **Accessibility** — to watch and rewrite the mouse events of the gesture.
+- **Screen Recording** — nothing is ever captured or recorded; this is the
+  permission macOS checks before one app may drive another app's windows,
+  which is what the window-server drag call does. Without it windows still
+  move, but via plain Accessibility repositioning — no native tiling and no
+  Magnet/Rectangle snapping.
 
 > **Gatekeeper note:** releases are signed with a development certificate and
 > not notarized, so the first launch needs right-click → Open (twice on
@@ -55,13 +63,13 @@ with third-party snap apps.
 No full Xcode required — the Swift CLI toolchain is enough:
 
 ```sh
-make run          # build dist/WindowShift.app (+ versioned .dmg) and launch
-./build.sh run    # shell-script equivalent (also: clean)
+./build.sh                 # build build/WindowShift.app
+./build.sh --dmg           # ...and package it into build/WindowShift.dmg
+./build.sh --sign          # ...Developer ID sign, notarize and staple
+./build.sh --publish v1.2  # tag, push and cut a GitHub release from the .dmg
 ```
 
-Or open `WindowShift.xcodeproj` in Xcode 16+ and run the WindowShift scheme
-(the target uses a synchronized folder reference, so new source files are
-picked up automatically).
+Flags combine. Then `open build/WindowShift.app`.
 
 Builds sign with your Apple Development certificate when one is in the
 keychain (`CODESIGN_IDENTITY` overrides the choice), falling back to an
@@ -81,13 +89,8 @@ recent modifier-drag did (or why it was ignored).
 | Key | Default | Meaning |
 |---|---|---|
 | `modifiers` | `ctrl,cmd` | Trigger combo; any of `cmd, ctrl, opt, shift, fn` |
-| `dragMode` | `offset` | `offset` (cursor stays put) or `warp` (cursor jumps to the grab point) |
-| `edgeSnapProximity` | `30` | Edge-handoff distance in px; `0` disables the handoff |
-| `handoffRelease` | `top-sticky` | `sticky`, `top-sticky`, or `mission-control` (see below) |
 | `magneticSnapDistance` | `0` (off) | Window-to-window magnetic snap distance in px |
-| `titleBarInset` | `4` | Fallback grab depth below the window top, px |
 | `resizeInset` | `8` | Resize grab inset from the corner, px (raise for big rounded corners) |
-| `trafficLightMargin` | `90` | Keep-clear zone from the window's left edge for fallback grabs, px |
 | `disabledApps` | `()` | Bundle IDs WindowShift ignores |
 | `showMenuBarIcon` | `true` | Hide/show the menu bar icon (see below) |
 
@@ -97,37 +100,6 @@ defaults write dev.nwf.WindowShift modifiers -string "ctrl,opt,cmd"
 defaults write dev.nwf.WindowShift magneticSnapDistance -float 8
 defaults write dev.nwf.WindowShift disabledApps -array "com.apple.finder"
 ```
-
-### Drag modes and edge handoff
-
-Native tiling watches the drag session's pointer, which WindowShift keeps at
-the window's title bar — away from your actual cursor. The two drag modes
-resolve that differently:
-
-- **`offset`** (default): the cursor stays where you grabbed and the window
-  tracks it 1:1. Approaching a screen edge that carries tiling zones, the
-  drag *hands off*: over the last stretch (4× `edgeSnapProximity` down to
-  `edgeSnapProximity`) the grab point drifts smoothly onto the cursor, so
-  zones preview and commit exactly at the mouse; it eases back if you pull
-  away. An edge only hands off while something actually has zones there —
-  the top and side edges follow the native tiling switches in System
-  Settings → Desktop & Dock, and all edges (bottom included) hand off while
-  a snap-on-drag app is running. Boundaries shared with an adjacent display
-  never hand off; drags cross them freely. With nothing to snap to, a drag
-  never shifts the window at all.
-- **`warp`**: the cursor jumps to the grab point for the duration of the
-  drag and back on release. Everything is native-exact at all times, at the
-  cost of the visible cursor jump.
-
-`handoffRelease` controls what happens to the collapsed handoff after the
-cursor leaves the edge band — this matters when dragging a window into
-Mission Control's Spaces bar, which sits *below* the band:
-
-- `top-sticky` (default) — stays collapsed only after engaging the top edge
-  (where Mission Control lives); eases back after the other edges
-- `sticky` — once collapsed at any edge, stays collapsed for the whole drag
-- `mission-control` — always eases back, but re-collapses whenever Mission
-  Control is detected open (no extra permissions needed)
 
 ### Hiding the menu bar icon
 
@@ -145,9 +117,9 @@ WindowShift keeps running headless. To bring it back, open WindowShift again
 - A modifier-click without a drag is swallowed (the app under the cursor
   never sees it) — inherent to grabbing the gesture; double-clicks are how
   the click-only actions are exposed.
-- Magnetic snapping only considers windows adjacent on the other axis,
-  yields to tiling near screen edges, and never applies to resize drags.
-  Neighbor positions are snapshotted when the drag starts.
+- Magnetic snapping only considers windows adjacent on the other axis and
+  never applies to resize drags. Neighbor positions are snapshotted when the
+  drag starts.
 
 ## How it works
 
@@ -155,26 +127,39 @@ WindowShift keeps running headless. To bring it back, open WindowShift again
    down/dragged/up (a keyboard tap for Esc is armed only while a drag is in
    flight).
 2. On modifier+mouseDown it swallows the click, finds the window under the
-   cursor via the Accessibility API, raises it, and computes a grab point.
-   For moves, it targets the gap between the red and yellow traffic-light
-   buttons (read per-window from AX button geometry — chrome in effectively
-   every app, never overlapped by tabs or toolbars), falling back to an AX
-   hit-test probe that skips tabs/controls, then to the clamped cursor
-   position. For resizes, it targets the window's resize border at the
-   nearest corner.
-3. The first drag event is mutated into a `leftMouseDown` at the grab
-   point — the WindowServer hit-tests the drag region and starts a real
-   drag/resize session.
-4. Subsequent drag/up events pass through with a location offset (and a
-   right→left button rewrite for resizes), so the window tracks the physical
-   mouse 1:1 until release. Edge handoff, magnetic snapping, and the
-   interior clamp are all expressed as adjustments to those event locations.
+   cursor via the Accessibility API, notes its window-server ID, raises it,
+   and parks a tiny invisible non-activating panel under the cursor.
+3. The first drag event is rewritten into a `leftMouseDown` on that panel, so
+   a mouse button is genuinely down and the app underneath never sees a click.
+4. The second drag event calls the window server's
+   `SLSDragWindowRelativeToMouse`, binding that live button press to a real
+   server-side drag of the target window — named by ID, so nothing has to be
+   clickable, on-screen, or free of controls. (This hand-over is what needs
+   the Screen Recording grant.) The panel stays up until release: it owns the
+   button press the session is bound to.
+5. Subsequent drag/up events pass through (with a right-to-left button rewrite
+   for resizes), and the window tracks the mouse 1:1 until release. Magnetic
+   snapping is expressed as an adjustment to those event locations, because
+   the drag follows the event stream rather than the hardware cursor.
+
+Resize works the older way: the first right-drag is rewritten into a
+`leftMouseDown` on the window's resize border at the nearest reachable corner,
+which starts a native resize session. There is no window-server primitive for
+interactive resize, and resize needs no tiling interop.
 
 Because the drag session is genuine, everything downstream — native tiling,
 Mission Control drops, Spaces edge-switching, Magnet/Rectangle — behaves
 exactly as it does for a manual title-bar drag.
 
-Technique studied from [AnyDrag](https://github.com/XueshiQiao/AnyDrag)
-(GPL-3; mechanism studied, no code copied), with detection-side validation
-against [Rectangle's SnappingManager](https://github.com/rxhanson/Rectangle)
-and the WindowManager.framework tiling internals.
+`SLSDragWindowRelativeToMouse` is private API, resolved at runtime rather than
+linked. If a future macOS removes it — or the Screen Recording grant is
+missing, in which case the call reports success and moves nothing — WindowShift
+detects it empirically (a bound drag that doesn't move the window) and falls
+back to plain Accessibility moves, saying so in the menu.
+
+Event-rewriting technique studied from
+[AnyDrag](https://github.com/XueshiQiao/AnyDrag) (GPL-3; mechanism studied, no
+code copied), with detection-side validation against
+[Rectangle's SnappingManager](https://github.com/rxhanson/Rectangle) and the
+WindowManager.framework tiling internals. The window-server drag call was
+found by probing SkyLight directly; see `window-move-mechanism-analysis-v1.md`.
