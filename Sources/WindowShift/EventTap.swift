@@ -25,11 +25,22 @@ final class EventTap {
             (1 << CGEventType.rightMouseDragged.rawValue) |
             (1 << CGEventType.rightMouseUp.rawValue)
 
-        // Session-level, head-insert, active tap: we mutate events in place.
+        // Session-level, TAIL-APPEND, active tap: we mutate events in place.
         // (HID-level location mutation is unreliable — see plan.)
+        //
+        // Tail-append, not head-insert, and that ordering is load-bearing.
+        // Snap-on-drag apps identify the window being dragged by hit-testing
+        // Accessibility at the mouse-DOWN. Going last means they see the
+        // user's genuine press, at the grab point, before this app has put
+        // anything under the cursor — so it resolves to the target window —
+        // and only afterwards do we swallow that press so the app itself
+        // never receives it. The synthetic press that follows is a rewritten
+        // DRAG event, which those apps do not watch (Magnet's tap mask covers
+        // down/up/moved/keys, never leftMouseDragged), so it cannot confuse
+        // the attribution they already made.
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
+            place: .tailAppendEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: windowShiftTapCallback,

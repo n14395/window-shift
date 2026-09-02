@@ -21,6 +21,7 @@ import CoreGraphics
 enum SkyLight {
     typealias MainConnFn = @convention(c) () -> Int32
     typealias DragRelFn  = @convention(c) (Int32, UInt32, CGPoint) -> Int32
+    typealias MoveWinFn  = @convention(c) (Int32, UInt32, UnsafePointer<CGPoint>) -> Int32
 
     private static let handle: UnsafeMutableRawPointer? =
         dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW)
@@ -33,6 +34,7 @@ enum SkyLight {
     private static let mainConnectionID: MainConnFn? = sym("SLSMainConnectionID", MainConnFn.self)
     private static let dragWindowRelativeToMouse: DragRelFn? =
         sym("SLSDragWindowRelativeToMouse", DragRelFn.self)
+    private static let moveWindow: MoveWinFn? = sym("SLSMoveWindow", MoveWinFn.self)
 
     /// Whether the mechanism is usable at all on this system.
     static var available: Bool { mainConnectionID != nil && dragWindowRelativeToMouse != nil }
@@ -58,5 +60,21 @@ enum SkyLight {
     static func beginDrag(window: CGWindowID, offset: CGPoint) -> Bool {
         guard let dragWindowRelativeToMouse else { return false }
         return dragWindowRelativeToMouse(connectionID, window, offset) == 0
+    }
+
+    /// Move one of THIS PROCESS's own windows, by top-left CG origin.
+    ///
+    /// Unlike the drag call this one is gated to the calling connection —
+    /// other apps' windows are refused — which is all the grab overlay needs.
+    /// What matters is that it is callable from any thread and takes effect
+    /// synchronously: the new position reads back out of the window server
+    /// immediately (measured: 200 moves, mean 0.00 ms, worst 0.01 ms), where
+    /// the AppKit equivalent has to hop to the main thread and can be stalled
+    /// there for hundreds of milliseconds by the very drags this app starts.
+    @discardableResult
+    static func move(window: CGWindowID, toTopLeft origin: CGPoint) -> Bool {
+        guard let moveWindow else { return false }
+        var point = origin
+        return moveWindow(connectionID, window, &point) == 0
     }
 }
