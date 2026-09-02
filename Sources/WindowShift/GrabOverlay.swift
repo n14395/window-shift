@@ -1,16 +1,6 @@
 import AppKit
 import CoreGraphics
 
-/// Diagnostic: counts the mouse-downs actually DELIVERED to the panel, so a
-/// gesture can prove whether its synthetic down landed here or fell through.
-private final class CountingPanel: NSPanel {
-    var downsSeen = 0
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown { downsSeen += 1 }
-        super.sendEvent(event)
-    }
-}
-
 /// A transparent panel parked around the grab point while a move gesture is
 /// in flight.
 ///
@@ -67,11 +57,10 @@ final class GrabOverlay {
     /// catches up (`move(toCG:)`), not by making the panel bigger.
     static let size: CGFloat = 40
 
-    private var panel: CountingPanel?
+    private var panel: NSPanel?
     private let lock = NSLock()
     private var armed = false
     private var windowID: CGWindowID = 0
-    private var lastCG = CGPoint.zero
 
     /// Put the panel on screen for good. Call once, from the main thread, at
     /// launch: everything after this is a property flip, never an order-in.
@@ -117,19 +106,11 @@ final class GrabOverlay {
         return frame.insetBy(dx: -tolerance, dy: -tolerance).contains(point) ? frame : nil
     }
 
-    /// Where the panel was last commanded to be (CG coords).
-    var lastShownCG: CGPoint {
-        lock.lock()
-        defer { lock.unlock() }
-        return lastCG
-    }
-
     /// Make the panel interactive and centre it on a CG (top-left origin)
     /// point, for a gesture that is starting.
     func arm(atCG point: CGPoint) {
         lock.lock()
         armed = false
-        lastCG = point
         lock.unlock()
         DispatchQueue.main.async { [self] in
             guard let panel, let origin = flipped(point) else { return }
@@ -144,9 +125,6 @@ final class GrabOverlay {
 
     /// Chase the hand while the server catches up. Keeps the armed state.
     func move(toCG point: CGPoint) {
-        lock.lock()
-        lastCG = point
-        lock.unlock()
         DispatchQueue.main.async { [self] in
             guard let panel, let origin = flipped(point) else { return }
             panel.setFrameOrigin(origin)
@@ -165,9 +143,6 @@ final class GrabOverlay {
         }
     }
 
-    /// MAIN THREAD ONLY (diagnostics).
-    var downsSeen: Int { panel?.downsSeen ?? 0 }
-
     /// CG (top-left, primary-relative) centre point → AppKit frame origin.
     /// The flip uses the PRIMARY screen's height and AppKit's global
     /// coordinates, which is correct for displays at negative coordinates too
@@ -178,8 +153,8 @@ final class GrabOverlay {
                        y: primaryHeight - point.y - Self.size / 2)
     }
 
-    private func makePanel() -> CountingPanel {
-        let panel = CountingPanel(
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: Self.size, height: Self.size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false

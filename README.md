@@ -12,8 +12,10 @@ everything that hooks into real drags still works.
 
 ## Features
 
-- **Native edge tiling** (macOS 15+), including hold-⌥-to-tile
 - **Snap apps just work** — Magnet, Rectangle, BetterTouchTool, Loop
+- **Native tiling too**, on the same drag — keep holding ⌥ as you let go and
+  macOS tiles the window instead of your snapper (see [Choosing which one
+  tiles](#choosing-which-one-tiles))
 - **Any window** — even ones whose title bar is crowded with tabs and controls,
   or parked off-screen entirely
 - **Native drag speed** — no per-frame IPC, and the cursor never warps
@@ -57,9 +59,30 @@ Double-click speed follows your system setting. A trigger-click without a drag
 is swallowed, so the app underneath never sees it — which is why the
 click-only actions are double-clicks.
 
-> **Avoid `opt` in the trigger** while "Hold ⌥ key while dragging windows to
-> tile" is enabled in System Settings — macOS reads that key during any drag,
-> so it stays reserved. The menu warns you when a combo conflicts with a system
+### Choosing which one tiles
+
+If you run a snapping app, its zones and macOS's own tiling both want the same
+drop, so the modifiers you are still holding when you release the button pick
+between them:
+
+| At the moment you let go | What tiles the window |
+|---|---|
+| the trigger combo, or nothing | your snapping app — Magnet, Rectangle, … |
+| **⌥ alone** (let the rest of the combo go first) | **macOS tiling** |
+
+Native tiling needs **Desktop & Dock → "Hold ⌥ key while dragging a window to
+tile"** switched on. With it off, ⌥ does nothing and every drop goes to your
+snapper. The two "drag windows to screen edges to tile" switches are
+independent; leaving them off keeps plain edge drops for your snapper and makes
+⌥ the deliberate way to ask for a macOS tile.
+
+If you have no snapping app installed, drops just tile natively and there is
+nothing to choose.
+
+> **A trigger combo containing `opt` is fine** — WindowShift scrubs the combo
+> off the events it emits, so holding it does not trip macOS's ⌥ tiling. That
+> is what makes "release everything but ⌥" a distinct instruction rather than
+> an accident. The menu still warns about combos that clash with a system
 > gesture.
 
 ## Configuration
@@ -103,15 +126,21 @@ A session-level `CGEventTap` watches the mouse. On trigger + mouseDown it
 swallows the click, finds the window under the cursor via the Accessibility
 API, raises it, and parks a tiny invisible panel under the cursor. The first
 drag event is rewritten into a `leftMouseDown` on that panel, so a mouse button
-is genuinely held without the app underneath ever seeing a click. The second
-drag event hands that live button press to the window server's
-`SLSDragWindowRelativeToMouse`, which begins a real drag of the target window —
-named by ID, so it needn't be clickable, on-screen, or free of controls. From
-there the window tracks the mouse 1:1 until release, and everything downstream
-(native tiling, Mission Control drops, Spaces edge-switching, Magnet, Rectangle)
-behaves exactly as it does for a manual title-bar drag. Magnetic snapping is
-expressed as an adjustment to the event locations, because the drag follows the
-event stream rather than the hardware cursor.
+is genuinely held without the app underneath ever seeing a click. As soon as
+that press has actually landed, the live button is handed to the window
+server's `SLSDragWindowRelativeToMouse`, which begins a real drag of the target
+window — named by ID, so it needn't be clickable, on-screen, or free of
+controls. From there the window tracks the mouse 1:1 until release, and
+everything downstream (native tiling, Mission Control drops, Spaces
+edge-switching, Magnet, Rectangle) behaves exactly as it does for a manual
+title-bar drag. Magnetic snapping is expressed as an adjustment to the event
+locations, because the drag follows the event stream rather than the hardware
+cursor.
+
+The trigger combo is scrubbed off every event WindowShift emits, which is what
+lets snapping apps see an ordinary unmodified drag; holding ⌥ without the rest
+of the combo is passed through instead, which is what macOS's ⌥ tiling reads.
+That is the whole of the choice described above.
 
 Resize works the older way: the first right-drag is rewritten into a
 `leftMouseDown` on the window's resize border at the nearest reachable corner,

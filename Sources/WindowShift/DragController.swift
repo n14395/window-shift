@@ -3,16 +3,17 @@ import CoreGraphics
 
 /// The core state machine. All mouse events from the tap flow through handle().
 ///
-/// **Move.** On modifier+mouseDown we swallow the click and park an invisible,
+/// **Move.** On modifier+mouseDown we swallow the click and arm an invisible,
 /// non-activating panel under the cursor (see `GrabOverlay`). The FIRST
 /// subsequent drag event is rewritten in flight into a `leftMouseDown` on that
-/// panel — so the target app never sees a click — and the SECOND hands the
-/// window server the target's window ID via `SLSDragWindowRelativeToMouse`,
-/// which binds the live button press to a genuine server-side drag of that
-/// window. From then on the window moves itself, server-side, tracking our
-/// event stream 1:1 with no per-frame IPC. Because the session is real,
-/// native edge tiling, Option-drag tiling and Magnet/Rectangle-style
-/// snap-on-drag all engage exactly as for a manual title-bar drag.
+/// panel — so the target app never sees a click — and once that press has
+/// landed we hand the window server the target's window ID via
+/// `SLSDragWindowRelativeToMouse`, which binds the live press to a genuine
+/// server-side drag of that window. From then on the window moves itself,
+/// server-side, tracking our event stream 1:1 with no per-frame IPC. Because
+/// the session is real, native edge tiling, ⌥-drag tiling and
+/// Magnet/Rectangle-style snap-on-drag all engage exactly as for a manual
+/// title-bar drag — which of them gets a given drop is decided by `moveFlags`.
 ///
 /// The point of naming the window by ID is that nothing has to be *clickable*:
 /// a window whose title bar is full of tabs and toolbar controls, or parked
@@ -67,8 +68,6 @@ final class DragController {
         /// Move only: no drag session is possible, so drive the window with
         /// Accessibility writes instead. No tiling, no snapping.
         var degraded: Bool
-        /// Drag events swallowed while waiting for the synthetic down to land.
-        var bindWaits = 0
         /// When the synthetic mouse-down was emitted; bounds that wait.
         var downAt = Date.distantPast
         /// Previous swallowed drag location, for the hand's per-event step.
@@ -87,10 +86,6 @@ final class DragController {
         var travelSince: Date?
         /// Last time the compensator sampled the window's real position.
         var lastDeficitCheck = Date.distantPast
-        // diagnostics (temporary)
-        var diag: [String] = []
-        var swallowedWaiting = 0
-        var gestureID = 0
         /// The last location we emitted — the session pointer. A cancel's
         /// synthetic mouse-up has to land exactly there.
         var lastEmitted: CGPoint
@@ -246,9 +241,6 @@ final class DragController {
                                                          tolerance: max(GrabOverlay.size, step * 2)) else {
                         guard Date().timeIntervalSince(grab.startedAt) < Self.overlayWait else {
                             state = .idle
-                            var lines = grab.diag
-                            lines.append("  ABANDONED after \(Int(Date().timeIntervalSince(grab.startedAt)*1000))ms, \(grab.swallowedWaiting) events swallowed")
-                            diagWrite(lines)
                             overlay.disarm()
                             onDragActiveChanged?(false)
                             lastStatus = "gesture abandoned — the grab overlay never appeared"
@@ -257,7 +249,6 @@ final class DragController {
                         // Chase the hand while waiting, so the down lands where
                         // the hand actually is, not back at the grab point.
                         overlay.move(toCG: event.location)
-                        grab.swallowedWaiting += 1
                         state = .pending(grab)
                         return nil   // swallow; try again on the next drag event
                     }
@@ -273,7 +264,6 @@ final class DragController {
                 // positional jump is exactly the discontinuity snap-on-drag
                 // apps discard. From this event on, the stream they see is
                 // gapless.
-                let handLoc = event.location
                 event.type = .leftMouseDown
                 if grab.isResize {
                     event.location = grab.point
@@ -290,7 +280,6 @@ final class DragController {
                     // all measure from the down.
                     grab.point = event.location
                     grab.cursorAtGrab = event.location
-                    grab.diag.append("  down emitted @\(event.location) hand@\(handLoc) panel=\(overlayFrame) waited=\(grab.swallowedWaiting)ev \(Int(Date().timeIntervalSince(grab.startedAt)*1000))ms")
                 }
                 event.setIntegerValueField(.mouseEventButtonNumber, value: 0)
                 event.setIntegerValueField(.mouseEventClickState, value: 1)
@@ -338,11 +327,9 @@ final class DragController {
                     let buttonLanded = CGEventSource.buttonState(.combinedSessionState, button: .left)
                     let waitedLongEnough = Date().timeIntervalSince(grab.downAt) >= Self.bindDeadline
                     guard buttonLanded || waitedLongEnough else {
-                        grab.bindWaits += 1
                         state = .dragging(grab)
                         return nil   // swallow: the window can't move yet anyway
                     }
-                    grab.diag.append("  bind after \(grab.bindWaits) deferrals, buttonState=\(buttonLanded)")
                     // The offset is measured from the down's location, so this
                     // event's travel is applied too — the window catches up by
                     // at most one inter-event step, and anything watching the
@@ -351,7 +338,6 @@ final class DragController {
                     let offset = CGPoint(x: grab.point.x - grab.originalFrame.minX,
                                          y: grab.point.y - grab.originalFrame.minY)
                     let ok = SkyLight.beginDrag(window: grab.windowID, offset: offset)
-                    grab.diag.append("  bind ok=\(ok) offset=\(offset) event@\(event.location)")
                     if !ok {
                         lastStatus = "the window server refused to drag the "
                             + "\(grab.appName) window"
@@ -385,14 +371,11 @@ final class DragController {
                                 || abs($0.minY - grab.originalFrame.minY) >= 1
                         } ?? true
                         grab.verified = true
-                        grab.diag.append("  verify moved=\(moved)")
                         if moved {
                             dragSessionsRefused = false
                         } else {
                             dragSessionsRefused = true
                             grab.degraded = true
-                            grab.diag.append("  DEGRADED to AX moves (live=\(String(describing: WindowResolver.liveBounds(of: grab.windowID))) orig=\(grab.originalFrame))")
-                            diagWrite(grab.diag)
                             releaseSyntheticButton(at: grab.lastEmitted)
                             overlay.disarm()
                             lastStatus = "moving a \(grab.appName) window — \(Self.noSessionNote)"
@@ -448,7 +431,6 @@ final class DragController {
                 } else {
                     lastStatus = "click swallowed (no drag)"
                 }
-                diagWrite(grab.diag + ["  ENDED IN PENDING (no drag emitted)"])
                 return nil
 
             case .dragging(var grab):
@@ -458,7 +440,6 @@ final class DragController {
                     onDragActiveChanged?(false)
                     lastStatus = "moved a \(grab.appName) window "
                         + "(no drag session — no tiling or snapping)"
-                    diagWrite(["  degraded gesture released @\(event.location)"])
                     return nil
                 }
                 if grab.isResize {
@@ -477,22 +458,6 @@ final class DragController {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { overlay.disarm() }
                 onDragActiveChanged?(false)
                 reportDragOutcome(grab, releasedAt: releasePoint)
-                if !grab.isResize, !grab.degraded {
-                    var lines = grab.diag
-                    let upBounds = WindowResolver.liveBounds(of: grab.windowID)
-                    lines.append("  up @\(releasePoint) flagsRaw=\(String(event.flags.rawValue, radix: 16)) bounds=\(String(describing: upBounds))")
-                    let wid2 = grab.windowID
-                    let gid = grab.gestureID
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-                        guard let self else { return }
-                        let after = WindowResolver.liveBounds(of: wid2)
-                        let baseline = self.diagDownsBaseline.removeValue(forKey: gid)
-                        let caught = baseline.map { overlay.downsSeen - $0 }
-                        let snapped = zip(upBounds, after).map { abs($0.width - $1.width) > 4 || abs($0.height - $1.height) > 4 } ?? false
-                        lines.append("  +0.7s bounds=\(String(describing: after)) SNAPPED=\(snapped) caughtDelta=\(caught.map(String.init) ?? "?")")
-                        self.diagWrite(lines)
-                    }
-                }
                 return pass
 
             case .cancelled(let isResize):
@@ -725,7 +690,6 @@ final class DragController {
         // No SkyLight means no drag session anywhere in this process, so say
         // so plainly and fall back to plain Accessibility moves.
         let degraded = !SkyLight.available
-        gestureCounter += 1
 
         // The press goes exactly where the user grabbed, so the drag stream is
         // continuous with it. Snap-on-drag apps follow the pointer from the
@@ -743,7 +707,7 @@ final class DragController {
             CGPoint(x: frame.midX, y: frame.minY + 14))
         if !degraded { overlay.arm(atCG: cursor) }
 
-        var g = Grab(isResize: false, appName: name,
+        return Grab(isResize: false, appName: name,
                     element: target.element, pid: target.pid,
                     originalFrame: frame, windowID: wid,
                     point: downPoint, offset: .zero,
@@ -755,21 +719,7 @@ final class DragController {
                                               : "the window-server drag SPI is missing")
                         : nil,
                     degraded: degraded, startedAt: Date(), lastEmitted: cursor)
-        let n = gestureCounter
-        g.gestureID = n
-        g.diag.append("gesture #\(n) \(Date()) app=\(name) wid=\(wid) down@\(cursor) rescue=\(rescue)")
-        let overlay = overlay
-        DispatchQueue.main.async { [weak self] in
-            // Baseline for the caught-down delta, kept OFF the tap thread's
-            // state entirely (an earlier version mutated the in-flight grab
-            // from here — a race that can corrupt the state machine).
-            self?.diagDownsBaseline[n] = overlay.downsSeen
-        }
-        return g
     }
-
-    /// Main-thread only: overlay down-counts at grab time, by gesture id.
-    private var diagDownsBaseline: [Int: Int] = [:]
 
     private func resizeGrab(cursor: CGPoint, target: TargetWindow, name: String,
                             windowID wid: CGWindowID, snapshot: [WindowSnapshot]) -> Grab? {
@@ -900,32 +850,6 @@ final class DragController {
         }
     }
 
-    // MARK: - Gesture diagnostics (temporary debug build)
-
-    static let diagPath = "/private/tmp/claude-501/-Users-nwf-build-window-shift/74cb368b-82a6-415a-b374-bd3ef53e8ace/scratchpad/gesture-diag.log"
-    private var gestureCounter = 0
-
-    /// Type-level note (tap-thread safe), for events outside a gesture record.
-    static func diagNote(_ line: String) {
-        let text = "!! \(Date()) \(line)\n"
-        DispatchQueue.global(qos: .utility).async {
-            if let h = FileHandle(forWritingAtPath: diagPath) {
-                h.seekToEndOfFile(); h.write(text.data(using: .utf8)!); try? h.close()
-            }
-        }
-    }
-
-    private func diagWrite(_ lines: [String]) {
-        let text = lines.joined(separator: "\n") + "\n"
-        DispatchQueue.global(qos: .utility).async {
-            if let h = FileHandle(forWritingAtPath: Self.diagPath) {
-                h.seekToEndOfFile(); h.write(text.data(using: .utf8)!); try? h.close()
-            } else {
-                try? text.write(toFile: Self.diagPath, atomically: true, encoding: .utf8)
-            }
-        }
-    }
-
     private func appName(pid: pid_t) -> String {
         NSRunningApplication(processIdentifier: pid)?.localizedName ?? "app \(pid)"
     }
@@ -1012,16 +936,16 @@ final class DragController {
     /// The two engines want opposite things from the same stream, measured
     /// with a full flag matrix (both live, on this machine):
     ///
-    ///  - **Snap-on-drag apps (Magnet) need the travel CLEAN.** One flagged
-    ///    stretch during the approach and they sit the whole gesture out;
-    ///    clearing the modifiers again before the drop does not bring them
-    ///    back. Physically holding the keys is irrelevant — they read the
-    ///    events' flags, not the keyboard.
-    ///  - **The native ⌥ accelerator needs ⌥ LATE.** (It is macOS's only
-    ///    edge-tiling path once "drag windows to screen edges to tile" is
-    ///    off.) Two ⌥-flagged drag events at the edge are enough to raise
-    ///    the preview, and ⌥ still held on the mouse-up commits it — a
-    ///    flagged up alone does nothing.
+    ///  - **Snap-on-drag apps (Magnet) need the stream CLEAN.** Modifier bits
+    ///    on the events make them sit the gesture out. Physically holding the
+    ///    keys is irrelevant — they read the events' flags, not the keyboard,
+    ///    so the trigger combo has to be scrubbed off, not merely ignored.
+    ///  - **The native accelerator needs ⌥ on the events.** Two ⌥-flagged drag
+    ///    events at the edge are enough to raise the preview, and ⌥ still set
+    ///    on the mouse-up commits the tile; a flagged up alone does nothing.
+    ///    It also has to be switched on at all — "Hold ⌥ key while dragging a
+    ///    window to tile" in Desktop & Dock. With it off, ⌥ does nothing here
+    ///    and every drop goes to the snapper, correctly but confusingly.
     ///
     /// Clean-by-default is therefore the only order that can serve both:
     /// strip the combo, and hand the stream over to the native accelerator
@@ -1041,12 +965,11 @@ final class DragController {
         let live = flags.intersection(Self.relevantModifiers)
         let combo = config.modifierFlags.intersection(Self.relevantModifiers)
         guard live.contains(.maskAlternate), live != combo else { return strippedFlags(flags) }
-        // Native mode. Passing the hand's modifiers along verbatim is not
-        // enough: with ⌥ alone the snapper stays engaged from the clean
-        // approach and the two engines race for the drop, which the snapper
-        // usually wins. The full combo alongside ⌥ is the shape measured to
-        // put the snapper out for good, so hand that over instead — the
-        // target app sees none of it either way.
+        // Native mode: hand over the same modifier shape a plain ⌥-drag of the
+        // title bar carries, rather than whatever partial combo the hand
+        // happens to be holding mid-release. The target app sees none of it —
+        // the overlay owns delivery — so the only readers are the tiling
+        // observers, and this is the shape they were measured against.
         return flags.union(combo).union(.maskAlternate)
     }
 

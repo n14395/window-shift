@@ -80,7 +80,6 @@ final class EventTap {
     /// thread; rapid repeated disables mean the Accessibility grant was
     /// revoked (WindowServer kills revoked taps) — surface that instead.
     func handleDisable() {
-        DragController.diagNote("TAP DISABLED (timeout or user-input) — gesture in flight dropped")
         // The events of the gesture in flight — crucially its mouse-up — were
         // never delivered while the tap was off, so the state machine would sit
         // waiting for one forever and ignore every later drag. Start clean.
@@ -126,11 +125,6 @@ private func windowShiftTapCallback(
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         eventTap.handleDisable()
         return nil
-    }
-    let started = Date()
-    defer {
-        let ms = Date().timeIntervalSince(started) * 1000
-        if ms > 100 { DragController.diagNote("slow tap callback: \(Int(ms))ms for \(type.rawValue)") }
     }
     return eventTap.controller.handle(type: type, event: event)
 }
