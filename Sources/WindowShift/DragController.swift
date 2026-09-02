@@ -39,22 +39,25 @@ final class DragController {
         /// names the drag target — so a move is declined without one. A
         /// resize tolerates 0 (it only weakens an occlusion check).
         let windowID: CGWindowID
-        /// Where the synthetic mouse-down goes: the cursor itself for a move
-        /// (which is where the overlay is), the resize corner for a resize.
-        let point: CGPoint
+        /// Where the drag stream is anchored. For a resize: the corner the
+        /// synthetic press hits. For a move: initially the grab cursor, then
+        /// UPDATED at bind time to the event location the SkyLight offset was
+        /// measured against — magnetic snap and the compensator project the
+        /// window's frame from here.
+        var point: CGPoint
         /// Resize only: `point` − cursor, re-applied to every event so the
         /// grabbed corner tracks the hand. Zero for moves — the server keeps
         /// the grabbed point under the cursor by itself.
         let offset: CGVector
-        /// Move only: cursor − window origin at mouse-down, handed to
-        /// `SkyLight.beginDrag`. This is the real grip, so the point the user
-        /// grabbed stays under the cursor even though the synthetic press
-        /// lands elsewhere.
-        let dragOffset: CGPoint
-        /// The physical cursor at mouse-down. For a move the synthetic press
-        /// goes to the title bar instead, so travel and magnetic snapping have
-        /// to measure from here, not from `point`.
-        let cursorAtGrab: CGPoint
+
+        /// Where the SkyLight drag was anchored (== `point` for moves, set at
+        /// bind); travel, verification and the compensator measure from here.
+        var cursorAtGrab: CGPoint
+        /// Move only: the grab started with the title bar off-workspace (the
+        /// rescue case). Only then may the anti-resistance compensator punch
+        /// the window through the server's edge-band pin — windows grabbed
+        /// normally keep the native sticky-edge feel.
+        let rescue: Bool
         /// Neighbour frames for magnetic snapping, snapshotted at grab time.
         /// Empty when the feature is off, or for a resize.
         let neighbors: [CGRect]
@@ -75,9 +78,16 @@ final class DragController {
         var bound = false
         /// Set once the bind has been shown to actually move the window.
         var verified = false
-        /// When the drag was handed to the window server, so the check that it
-        /// took effect does not run before the server could possibly act.
-        var boundAt: Date?
+        /// When the pointer first got 24+ px from the grab, so the "did the
+        /// window actually move" check only judges travel the server has had
+        /// time to process.
+        var travelSince: Date?
+        /// Last time the compensator sampled the window's real position.
+        var lastDeficitCheck = Date.distantPast
+        // diagnostics (temporary)
+        var diag: [String] = []
+        var swallowedWaiting = 0
+        var gestureID = 0
         /// The last location we emitted — the session pointer. A cancel's
         /// synthetic mouse-up has to land exactly there.
         var lastEmitted: CGPoint
@@ -114,10 +124,23 @@ final class DragController {
     /// perfectly aligned instead of jumping by the pointer travel.
     private static let bindDelay: TimeInterval = 0.03
 
-    /// How long after the bind to wait before judging whether the window
-    /// server honoured it. Several drag events must have been delivered, so
-    /// this is generously longer than one frame.
-    private static let verifyDelay: TimeInterval = 0.25
+    /// The server's drag sessions pin a window at display edge-resistance
+    /// bands (measured: a window parked above the workspace, dragged gently
+    /// down, sticks the moment its top hits the menu-bar band — and stays
+    /// stuck for the whole drag, while big per-event steps punch through).
+    /// For a rescue drag that pin is pathological, so when the window's real
+    /// position falls this far behind where the pointer says it should be,
+    /// one event is emitted with the whole deficit added — measured to free
+    /// the pin, after which tracking resumes exactly.
+    private static let deficitThreshold: CGFloat = 16
+    private static let deficitCap: CGFloat = 300
+    private static let deficitInterval: TimeInterval = 0.06
+
+    /// How long 24+ px of travel must have been outstanding before judging
+    /// whether the window server honoured the bind. The server applies a drag
+    /// event within a frame or two, so this is generous — but it is measured
+    /// from when the TRAVEL happened, never from the bind.
+    private static let verifyDelay: TimeInterval = 0.2
 
 
     /// Toggled from the menu (main thread); read on the tap thread.
@@ -131,19 +154,12 @@ final class DragController {
     /// Esc (cancel) keyboard tap only while one is in flight.
     var onDragActiveChanged: ((Bool) -> Void)?
 
-    /// Cleared the first time a bound drag is seen to move nothing, so the
-    /// rest of the session goes straight to the Accessibility fallback instead
-    /// of dying silently on every gesture. Re-armed by reloadConfig(), so
-    /// granting the missing permission takes effect without a relaunch.
-    private var dragSessionsWork = true
-
     private var state: State = .idle
     private var config = Config.load()
     private let overlay = GrabOverlay()
 
     func reloadConfig() {
         config = Config.load()
-        dragSessionsWork = SkyLight.available
         dragSessionsRefused = false
     }
 
@@ -170,8 +186,10 @@ final class DragController {
     /// a future macOS removing it is visible rather than mysterious.
     var dragSessionsAvailable: Bool { SkyLight.available }
 
-    /// True once a drag has been observed to bind and move nothing — the
-    /// window server is refusing the hand-over, so moves are degraded.
+    /// True while the most recent judged drag bound and moved nothing — the
+    /// window server refused the hand-over (missing Screen Recording), so that
+    /// gesture fell back to Accessibility moves. Cleared by the next drag that
+    /// verifies, and by reloadConfig(). Drives the menu's grant hint.
     private(set) var dragSessionsRefused = false
 
     // MARK: - Event handling (tap thread)
@@ -221,13 +239,45 @@ final class DragController {
                         lastStatus = "gesture abandoned — the grab overlay never appeared"
                         return nil
                     }
+                    // Chase the hand while waiting, so the down lands where
+                    // the hand actually is, not back at the grab point.
+                    overlay.move(toCG: event.location)
+                    grab.swallowedWaiting += 1
+                    state = .pending(grab)
                     return nil   // swallow; try again on the next drag event
                 }
 
                 // First drag: puts the button down — on our overlay for a
                 // move, on the window's resize border for a resize.
+                //
+                // A move's down goes at the hand's CURRENT position (clamped
+                // onto the overlay), not back at the grab point: the hand kept
+                // moving while readiness was awaited, and a down followed by a
+                // positional jump is exactly the discontinuity snap-on-drag
+                // apps discard. From this event on, the stream they see is
+                // gapless.
+                let handLoc = event.location
                 event.type = .leftMouseDown
-                event.location = grab.point
+                if grab.isResize {
+                    event.location = grab.point
+                } else {
+                    // Clamp the down into the panel's last commanded position:
+                    // the panel chased the hand while readiness was awaited,
+                    // so this is at most an event or two behind the hand.
+                    let centre = overlay.lastShownCG
+                    let reach = GrabOverlay.size / 2 - 6
+                    event.location = CGPoint(
+                        x: min(max(event.location.x, centre.x - reach), centre.x + reach),
+                        y: min(max(event.location.y, centre.y - reach), centre.y + reach))
+                    // The stream is anchored here from now on: the bind's
+                    // offset, magnetic projection, travel and the compensator
+                    // all measure from the down.
+                    grab.point = event.location
+                    grab.cursorAtGrab = event.location
+                }
+                if !grab.isResize {
+                    grab.diag.append("  down emitted @\(event.location) hand@\(handLoc) cmd=\(overlay.lastShownCG) waited=\(grab.swallowedWaiting)ev \(Int(Date().timeIntervalSince(grab.startedAt)*1000))ms")
+                }
                 event.setIntegerValueField(.mouseEventButtonNumber, value: 0)
                 event.setIntegerValueField(.mouseEventClickState, value: 1)
                 event.flags = strippedFlags(event.flags)
@@ -250,63 +300,83 @@ final class DragController {
                     event.type = .leftMouseDragged
                     event.setIntegerValueField(.mouseEventButtonNumber, value: 0)
                 } else if !grab.bound {
-                    // Wait for the press to settle before handing the window
-                    // over; swallow drags meanwhile so the pointer travel does
-                    // not become a grip offset.
-                    guard let downAt = grab.downAt,
-                          Date().timeIntervalSince(downAt) >= Self.bindDelay else { return nil }
-                    // The synthetic down from the previous event has landed, so
-                    // the server has a live button press to bind to. Its
-                    // pointer is still AT that down, which is why the offset
-                    // measured at grab time is the right one: the window stays
-                    // put now and tracks from here.
+                    // The down from the previous event has landed; bind NOW.
+                    // The offset is measured from the down's location, so this
+                    // event's travel is applied too — the window catches up by
+                    // at most one inter-event step, and anything watching the
+                    // stream sees it moving from the first drag after the
+                    // down. (Binding any later reads as a content drag to
+                    // snap-on-drag apps and they disengage; measured.)
                     grab.bound = true
-                    grab.boundAt = Date()
-                    let ok = SkyLight.beginDrag(window: grab.windowID, offset: grab.dragOffset)
+                    let offset = CGPoint(x: grab.point.x - grab.originalFrame.minX,
+                                         y: grab.point.y - grab.originalFrame.minY)
+                    let ok = SkyLight.beginDrag(window: grab.windowID, offset: offset)
+                    grab.diag.append("  bind ok=\(ok) offset=\(offset) event@\(event.location)")
                     if !ok {
                         lastStatus = "the window server refused to drag the "
                             + "\(grab.appName) window"
                     }
                     // The overlay stays up for the whole drag: it owns the
                     // mouse-down the session is bound to, and ordering it out
-                    // while the button is still down ends the session.
+                    // while the button is down ends the session.
                 }
                 // A bind that reports success but moves nothing means the
-                // window server declined the hand-over — on this system the
-                // observed cause is a missing Screen Recording grant. Rather
-                // than guess at permissions, prove it: once the pointer has
-                // travelled far enough for movement to be unmistakable, look
-                // at the window. If it has not budged, release the button and
-                // finish the gesture (and every later one) with Accessibility
-                // moves, so the user gets a window that moves and a status
-                // line saying what was lost.
-                // Give the server time to actually act first: the binding
-                // event has not even been delivered yet at the moment the bind
-                // returns, so anything sooner than this always reports "did not
-                // move" and would degrade every single drag.
-                if grab.bound, !grab.verified,
-                   let boundAt = grab.boundAt,
-                   Date().timeIntervalSince(boundAt) >= Self.verifyDelay,
-                   hypot(event.location.x - grab.cursorAtGrab.x,
-                         event.location.y - grab.cursorAtGrab.y) >= 24 {
-                    let moved = WindowResolver.liveBounds(of: grab.windowID).map {
-                        abs($0.minX - grab.originalFrame.minX) >= 1
-                            || abs($0.minY - grab.originalFrame.minY) >= 1
-                    } ?? true
-                    grab.verified = true
-                    if !moved {
-                        dragSessionsWork = false
-                        dragSessionsRefused = true
-                        grab.degraded = true
-                        releaseSyntheticButton(at: grab.lastEmitted)
-                        overlay.hide()
-                        lastStatus = "moving a \(grab.appName) window — \(Self.noSessionNote)"
-                        state = .dragging(grab)
-                        moveWithAccessibility(grab, to: event.location)
-                        return nil
+                // window server declined the hand-over — the observed cause is
+                // a missing Screen Recording grant. Rather than guess at
+                // permissions, prove it: once 24+ px of travel has been
+                // OUTSTANDING long enough for the server to have processed it,
+                // look at the window. Judging fresh travel instead misfires on
+                // the everyday grab-pause-flick gesture — at the flick's first
+                // event the window legitimately hasn't moved yet — and a
+                // misjudgment here must only ever cost THIS gesture: the next
+                // one tries the real mechanism again, so one bad call can
+                // never silently strip the rest of the session of its tiling
+                // and snapping.
+                if grab.bound, !grab.verified {
+                    if grab.travelSince == nil,
+                       hypot(event.location.x - grab.cursorAtGrab.x,
+                             event.location.y - grab.cursorAtGrab.y) >= 24 {
+                        grab.travelSince = Date()
+                    }
+                    if let since = grab.travelSince,
+                       Date().timeIntervalSince(since) >= Self.verifyDelay {
+                        let moved = WindowResolver.liveBounds(of: grab.windowID).map {
+                            abs($0.minX - grab.originalFrame.minX) >= 1
+                                || abs($0.minY - grab.originalFrame.minY) >= 1
+                        } ?? true
+                        grab.verified = true
+                        grab.diag.append("  verify moved=\(moved)")
+                        if moved {
+                            dragSessionsRefused = false
+                        } else {
+                            dragSessionsRefused = true
+                            grab.degraded = true
+                            releaseSyntheticButton(at: grab.lastEmitted)
+                            overlay.hide()
+                            lastStatus = "moving a \(grab.appName) window — \(Self.noSessionNote)"
+                            state = .dragging(grab)
+                            moveWithAccessibility(grab, to: event.location)
+                            return nil
+                        }
                     }
                 }
-                event.location = alignedLocation(event.location, grab: grab)
+                var location = alignedLocation(event.location, grab: grab)
+                // Anti-resistance for rescue drags (see deficitThreshold).
+                if grab.rescue, grab.bound,
+                   Date().timeIntervalSince(grab.lastDeficitCheck) >= Self.deficitInterval {
+                    grab.lastDeficitCheck = Date()
+                    if let live = WindowResolver.liveBounds(of: grab.windowID) {
+                        let dx = grab.originalFrame.minX
+                            + (event.location.x - grab.cursorAtGrab.x) - live.minX
+                        let dy = grab.originalFrame.minY
+                            + (event.location.y - grab.cursorAtGrab.y) - live.minY
+                        if abs(dx) > Self.deficitThreshold || abs(dy) > Self.deficitThreshold {
+                            location.x += min(max(dx, -Self.deficitCap), Self.deficitCap)
+                            location.y += min(max(dy, -Self.deficitCap), Self.deficitCap)
+                        }
+                    }
+                }
+                event.location = location
                 event.flags = strippedFlags(event.flags)
                 grab.lastEmitted = event.location
                 state = .dragging(grab)
@@ -356,9 +426,29 @@ final class DragController {
                 event.flags = strippedFlags(event.flags)
                 grab.lastEmitted = releasePoint
                 state = .idle
-                overlay.hide()
+                // Hide a beat later: the up we are passing through has not
+                // been routed yet, and it must land on the overlay — never on
+                // whatever drop target sits under the cursor.
+                let overlay = overlay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { overlay.hide() }
                 onDragActiveChanged?(false)
                 reportDragOutcome(grab, releasedAt: releasePoint)
+                if !grab.isResize, !grab.degraded {
+                    var lines = grab.diag
+                    let upBounds = WindowResolver.liveBounds(of: grab.windowID)
+                    lines.append("  up @\(releasePoint) flagsRaw=\(String(event.flags.rawValue, radix: 16)) bounds=\(String(describing: upBounds))")
+                    let wid2 = grab.windowID
+                    let gid = grab.gestureID
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+                        guard let self else { return }
+                        let after = WindowResolver.liveBounds(of: wid2)
+                        let baseline = self.diagDownsBaseline.removeValue(forKey: gid)
+                        let caught = baseline.map { overlay.downsSeen - $0 }
+                        let snapped = zip(upBounds, after).map { abs($0.width - $1.width) > 4 || abs($0.height - $1.height) > 4 } ?? false
+                        lines.append("  +0.7s bounds=\(String(describing: after)) SNAPPED=\(snapped) caughtDelta=\(caught.map(String.init) ?? "?")")
+                        self.diagWrite(lines)
+                    }
+                }
                 return pass
 
             case .cancelled(let isResize):
@@ -590,7 +680,8 @@ final class DragController {
         }
         // No SkyLight means no drag session anywhere in this process, so say
         // so plainly and fall back to plain Accessibility moves.
-        let degraded = !SkyLight.available || !dragSessionsWork
+        let degraded = !SkyLight.available
+        gestureCounter += 1
 
         // The press goes exactly where the user grabbed, so the drag stream is
         // continuous with it. Snap-on-drag apps follow the pointer from the
@@ -603,15 +694,16 @@ final class DragController {
         // what makes this two lines instead of the probing ladder it replaced.
         let frame = target.frame
         let downPoint = cursor
-        if !degraded { overlay.show(atCG: downPoint) }
+        // The title-bar row's midpoint on no display = the rescue scenario.
+        let rescue = !WindowResolver.onAnyDisplay(
+            CGPoint(x: frame.midX, y: frame.minY + 14))
+        if !degraded { overlay.show(atCG: cursor) }
 
-        return Grab(isResize: false, appName: name,
+        var g = Grab(isResize: false, appName: name,
                     element: target.element, pid: target.pid,
                     originalFrame: frame, windowID: wid,
                     point: downPoint, offset: .zero,
-                    dragOffset: CGPoint(x: cursor.x - frame.minX,
-                                        y: cursor.y - frame.minY),
-                    cursorAtGrab: cursor,
+                    cursorAtGrab: cursor, rescue: rescue,
                     neighbors: config.magneticSnapDistance > 0
                         ? neighborFrames(excluding: target, in: snapshot) : [],
                     note: degraded
@@ -619,7 +711,21 @@ final class DragController {
                                               : "the window-server drag SPI is missing")
                         : nil,
                     degraded: degraded, startedAt: Date(), lastEmitted: cursor)
+        let n = gestureCounter
+        g.gestureID = n
+        g.diag.append("gesture #\(n) \(Date()) app=\(name) wid=\(wid) down@\(cursor) rescue=\(rescue)")
+        let overlay = overlay
+        DispatchQueue.main.async { [weak self] in
+            // Baseline for the caught-down delta, kept OFF the tap thread's
+            // state entirely (an earlier version mutated the in-flight grab
+            // from here — a race that can corrupt the state machine).
+            self?.diagDownsBaseline[n] = overlay.downsSeen
+        }
+        return g
     }
+
+    /// Main-thread only: overlay down-counts at grab time, by gesture id.
+    private var diagDownsBaseline: [Int: Int] = [:]
 
     private func resizeGrab(cursor: CGPoint, target: TargetWindow, name: String,
                             windowID wid: CGWindowID, snapshot: [WindowSnapshot]) -> Grab? {
@@ -641,7 +747,7 @@ final class DragController {
                     point: choice.point,
                     offset: CGVector(dx: choice.point.x - cursor.x,
                                      dy: choice.point.y - cursor.y),
-                    dragOffset: .zero, cursorAtGrab: cursor,
+                    cursorAtGrab: cursor, rescue: false,
                     neighbors: [], note: choice.note,
                     degraded: false, startedAt: Date(), lastEmitted: choice.point)
     }
@@ -736,7 +842,7 @@ final class DragController {
     /// leaving the user to wonder. Purely observational: it runs after the
     /// gesture is over and touches no events.
     private func reportDragOutcome(_ grab: Grab, releasedAt: CGPoint) {
-        guard grab.windowID != 0, !grab.isResize else { return }
+        guard grab.windowID != 0, !grab.isResize, grab.bound else { return }
         let travel = hypot(releasedAt.x - grab.cursorAtGrab.x,
                            releasedAt.y - grab.cursorAtGrab.y)
         guard travel >= 24 else { return }
@@ -746,6 +852,22 @@ final class DragController {
             guard let self, let now = WindowResolver.liveBounds(of: grab.windowID) else { return }
             if abs(now.minX - before.minX) < 2, abs(now.minY - before.minY) < 2 {
                 self.lastStatus = "the \(name) window didn't move — no drag session started"
+            }
+        }
+    }
+
+    // MARK: - Gesture diagnostics (temporary debug build)
+
+    static let diagPath = "/private/tmp/claude-501/-Users-nwf-build-window-shift/74cb368b-82a6-415a-b374-bd3ef53e8ace/scratchpad/gesture-diag.log"
+    private var gestureCounter = 0
+
+    private func diagWrite(_ lines: [String]) {
+        let text = lines.joined(separator: "\n") + "\n"
+        DispatchQueue.global(qos: .utility).async {
+            if let h = FileHandle(forWritingAtPath: Self.diagPath) {
+                h.seekToEndOfFile(); h.write(text.data(using: .utf8)!); try? h.close()
+            } else {
+                try? text.write(toFile: Self.diagPath, atomically: true, encoding: .utf8)
             }
         }
     }
@@ -848,6 +970,11 @@ final class DragController {
         }
         return CGEventFlags(rawValue: raw)
     }
+}
+
+private func zip<A, B>(_ a: A?, _ b: B?) -> (A, B)? {
+    guard let a, let b else { return nil }
+    return (a, b)
 }
 
 private func + (point: CGPoint, vector: CGVector) -> CGPoint {
