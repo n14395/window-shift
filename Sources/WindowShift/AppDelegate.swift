@@ -43,6 +43,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ("fn", "fn"),
     ]
 
+    /// Temporary diagnostic: the grab overlay is ordered on screen by the main
+    /// thread, so a main-thread stall costs the whole gesture. Record them.
+    private var watchdogTick = Date()
+    private func startMainThreadWatchdog() {
+        watchdogTick = Date()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let now = Date()
+            let gap = now.timeIntervalSince(self.watchdogTick)
+            self.watchdogTick = now
+            if gap > 0.3 { DragController.diagNote("MAIN THREAD stalled \(Int(gap * 1000))ms") }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: ["enabled": true, "showMenuBarIcon": true])
         // One-time cleanup of keys left behind by removed features. The
@@ -54,8 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             UserDefaults.standard.removeObject(forKey: dead)
         }
         controller.enabled = UserDefaults.standard.bool(forKey: "enabled")
+        // Put the grab overlay on screen now, once: ordering a window in costs
+        // a window-server round trip, and paying it at gesture time is what
+        // used to lose gestures outright (see GrabOverlay).
+        controller.prepareOverlay()
 
         setupStatusItem()
+        startMainThreadWatchdog()
         observeSessionSwitching()
         observePermissionLoss()
         for key in Self.observedKeys {
