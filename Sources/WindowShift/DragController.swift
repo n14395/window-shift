@@ -275,14 +275,10 @@ final class DragController {
                     // It was just placed under this very event's location, so
                     // this is normally the hand's exact position — the stream
                     // snap-on-drag apps watch has no discontinuity at all.
-                    if GrabOverlay.size > 12 {
-                        let safe = overlayFrame.insetBy(dx: 6, dy: 6)
-                        event.location = CGPoint(
-                            x: min(max(event.location.x, safe.minX), safe.maxX),
-                            y: min(max(event.location.y, safe.minY), safe.maxY))
-                    } else if GrabOverlay.size > 0 {
-                        event.location = CGPoint(x: overlayFrame.midX, y: overlayFrame.midY)
-                    }
+                    let safe = overlayFrame.insetBy(dx: 6, dy: 6)
+                    event.location = CGPoint(
+                        x: min(max(event.location.x, safe.minX), safe.maxX),
+                        y: min(max(event.location.y, safe.minY), safe.maxY))
                     // NOTE: grab.point / cursorAtGrab deliberately keep the
                     // user's real grab point. The click has to land on the
                     // panel, but the window must hang off the point the user
@@ -355,23 +351,6 @@ final class DragController {
                     // out which window is being dragged — finds the target
                     // window rather than a WindowShift panel.
                     overlay.vacate()
-                    // The catcher has done its job and just moved away, so the
-                    // pointer is over the dragged window again. Snap-on-drag
-                    // apps identify the window by hit-testing Accessibility at
-                    // a mouse-DOWN (Magnet taps down/up and never the drags),
-                    // and the down they saw resolved to our catcher. Give them
-                    // one they can read correctly: while a button is already
-                    // held the window server routes every further press to the
-                    // grab owner — us — so the app underneath never sees it.
-                    if UserDefaults.standard.bool(forKey: "debugSnapperPing"),
-                       let ping = CGEvent(mouseEventSource: Self.syntheticSource,
-                                          mouseType: .leftMouseDown,
-                                          mouseCursorPosition: event.location,
-                                          mouseButton: .left) {
-                        ping.setIntegerValueField(.mouseEventClickState, value: 1)
-                        ping.flags = moveFlags(event.flags)
-                        ping.post(tap: .cghidEventTap)
-                    }
                     if !ok {
                         lastStatus = "the window server refused to drag the "
                             + "\(grab.appName) window"

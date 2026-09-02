@@ -60,14 +60,8 @@ private final class CountingPanel: NSPanel {
 /// swallows a real click; ordering it out and back in is what used to cost
 /// the main-thread stall, so it is never ordered out at all.
 final class GrabOverlay {
-    /// See the type comment. Overridable for A/B testing which sizes a
-    /// snap-on-drag app ignores; 0 means "no panel at all", i.e. let the click
-    /// fall through to the app, which is the control case.
-    ///   defaults write dev.nwf.WindowShift debugOverlaySize -float 4
-    static let size: CGFloat = {
-        let v = UserDefaults.standard.object(forKey: "debugOverlaySize") as? Double
-        return CGFloat(v ?? 40)
-    }()
+    /// See the type comment.
+    static let size: CGFloat = 40
 
     private var panel: CountingPanel?
     private let lock = NSLock()
@@ -100,10 +94,6 @@ final class GrabOverlay {
         let wid = windowID
         lock.unlock()
         guard wid != 0 else { return nil }
-        // Size 0: deliberately no catcher — the click falls through to the
-        // app. Diagnostic control case only.
-        if Self.size == 0 { return CGRect(origin: point, size: .zero) }
-
         let origin = CGPoint(x: (point.x - Self.size / 2).rounded(),
                              y: (point.y - Self.size / 2).rounded())
         guard SkyLight.move(window: wid, toTopLeft: origin) else { return nil }
