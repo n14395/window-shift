@@ -12,7 +12,8 @@ everything that hooks into real drags still works.
 
 ## Features
 
-- **Snap apps just work** — Magnet, Rectangle, BetterTouchTool, Loop
+- **Snap apps just work** — verified against Magnet; the mechanism is generic,
+  so Rectangle, BetterTouchTool and Loop should behave the same way
 - **Native tiling too**, on the same drag — keep holding ⌥ as you let go and
   macOS tiles the window instead of your snapper (see [Choosing which one
   tiles](#choosing-which-one-tiles))
@@ -76,8 +77,10 @@ snapper. The two "drag windows to screen edges to tile" switches are
 independent; leaving them off keeps plain edge drops for your snapper and makes
 ⌥ the deliberate way to ask for a macOS tile.
 
-If you have no snapping app installed, drops just tile natively and there is
-nothing to choose.
+With no snapping app installed there is nothing to choose between, but a plain
+drop still just *moves* the window — ⌥ is what tiles it. Switch on "drag
+windows to screen edges to tile" as well if you want plain edge drops to tile
+on their own.
 
 > **A trigger combo containing `opt` is fine** — WindowShift scrubs the combo
 > off the events it emits, so holding it does not trip macOS's ⌥ tiling. That
@@ -124,7 +127,7 @@ WindowShift again from Spotlight or Finder, or set `showMenuBarIcon` back to
 
 A session-level `CGEventTap` watches the mouse. On trigger + mouseDown it
 swallows the click, finds the window under the cursor via the Accessibility
-API, raises it, and parks a tiny invisible panel under the cursor. The first
+API, raises it, and places a tiny invisible panel under the cursor. The next
 drag event is rewritten into a `leftMouseDown` on that panel, so a mouse button
 is genuinely held without the app underneath ever seeing a click. As soon as
 that press has actually landed, the live button is handed to the window
@@ -137,10 +140,33 @@ title-bar drag. Magnetic snapping is expressed as an adjustment to the event
 locations, because the drag follows the event stream rather than the hardware
 cursor.
 
-The trigger combo is scrubbed off every event WindowShift emits, which is what
-lets snapping apps see an ordinary unmodified drag; holding ⌥ without the rest
-of the combo is passed through instead, which is what macOS's ⌥ tiling reads.
-That is the whole of the choice described above.
+Two details of that are load-bearing, and both look like tidying opportunities:
+
+**The tap is tail-appended, not head-inserted.** Snapping apps identify the
+window you are dragging by hit-testing Accessibility at the mouse-down. Going
+last in the tap chain means they see your real press, at the point you actually
+grabbed, before WindowShift has put anything under the cursor — so it resolves
+to your window — and only afterwards do we swallow that press so the app itself
+never receives it. Head-inserting the tap silently kills third-party snapping:
+the only press those apps would then see is the synthetic one, which resolves to
+a WindowShift panel. (The synthetic press is a rewritten *drag* event, which
+snappers don't watch, so it can't override the attribution they already made.)
+
+**The panel is placed at the mouse-down, not at the drag that clicks it.** The
+window server applies geometry on its own schedule, so a panel moved and clicked
+in the same instant can still be hit-tested at its previous position — and the
+click lands in the user's document instead, selecting text or dragging Finder
+items. Placing it one event earlier is what buys the server time to apply it.
+The panel is also resident — parked a single pixel on-screen between gestures
+rather than ordered in and out — because making a window visible costs a
+CoreAnimation fence round-trip to the window server, and the server is busiest
+during exactly a drag, a tile preview or a snap. Sampling caught that call
+blocking the main thread for over a second, which lost whole gestures.
+
+Which engine gets a given drop is a separate question, decided by the modifiers
+on the events at the *release*: the trigger combo is scrubbed off, leaving a
+clean release that your snapper acts on, while ⌥ held without the rest of the
+combo is passed through, which is what macOS's ⌥ tiling reads.
 
 Resize works the older way: the first right-drag is rewritten into a
 `leftMouseDown` on the window's resize border at the nearest reachable corner,
@@ -181,4 +207,6 @@ Event-rewriting technique studied from
 code copied), with detection-side validation against
 [Rectangle](https://github.com/rxhanson/Rectangle) and the
 WindowManager.framework tiling internals. The window-server drag call was found
-by probing SkyLight directly.
+by probing SkyLight directly, and the interop with snapping apps was worked out
+by reading Magnet's imported symbols and event-tap mask to see how it decides
+which window a drag belongs to.
