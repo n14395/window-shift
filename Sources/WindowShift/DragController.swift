@@ -234,6 +234,10 @@ final class DragController {
                 if !grab.isResize, !overlay.isReady {
                     guard Date().timeIntervalSince(grab.startedAt) < Self.overlayWait else {
                         state = .idle
+                        var lines = grab.diag
+                        lines.append("  ABANDONED after \(Int(Date().timeIntervalSince(grab.startedAt)*1000))ms, \(grab.swallowedWaiting) events swallowed")
+                        lines.append("  overlay \(overlay.debugState)")
+                        diagWrite(lines)
                         overlay.hide()
                         onDragActiveChanged?(false)
                         lastStatus = "gesture abandoned — the grab overlay never appeared"
@@ -277,10 +281,15 @@ final class DragController {
                 }
                 if !grab.isResize {
                     grab.diag.append("  down emitted @\(event.location) hand@\(handLoc) cmd=\(overlay.lastShownCG) waited=\(grab.swallowedWaiting)ev \(Int(Date().timeIntervalSince(grab.startedAt)*1000))ms")
+                    if grab.swallowedWaiting > 0 {
+                        grab.diag.append("  overlay \(overlay.debugState)")
+                    }
                 }
                 event.setIntegerValueField(.mouseEventButtonNumber, value: 0)
                 event.setIntegerValueField(.mouseEventClickState, value: 1)
-                event.flags = strippedFlags(event.flags)
+                // Move streams keep the held modifiers; resize streams don't —
+                // see strippedFlags for why the two differ.
+                if grab.isResize { event.flags = strippedFlags(event.flags) }
                 grab.lastEmitted = event.location
                 grab.downAt = Date()
                 state = .dragging(grab)
@@ -377,7 +386,7 @@ final class DragController {
                     }
                 }
                 event.location = location
-                event.flags = strippedFlags(event.flags)
+                if grab.isResize { event.flags = strippedFlags(event.flags) }
                 grab.lastEmitted = event.location
                 state = .dragging(grab)
                 return pass
@@ -423,7 +432,7 @@ final class DragController {
                 }
                 let releasePoint = alignedLocation(event.location, grab: grab)
                 event.location = releasePoint
-                event.flags = strippedFlags(event.flags)
+                if grab.isResize { event.flags = strippedFlags(event.flags) }
                 grab.lastEmitted = releasePoint
                 state = .idle
                 // Hide a beat later: the up we are passing through has not
@@ -861,6 +870,16 @@ final class DragController {
     static let diagPath = "/private/tmp/claude-501/-Users-nwf-build-window-shift/74cb368b-82a6-415a-b374-bd3ef53e8ace/scratchpad/gesture-diag.log"
     private var gestureCounter = 0
 
+    /// Type-level note (tap-thread safe), for events outside a gesture record.
+    static func diagNote(_ line: String) {
+        let text = "!! \(Date()) \(line)\n"
+        DispatchQueue.global(qos: .utility).async {
+            if let h = FileHandle(forWritingAtPath: diagPath) {
+                h.seekToEndOfFile(); h.write(text.data(using: .utf8)!); try? h.close()
+            }
+        }
+    }
+
     private func diagWrite(_ lines: [String]) {
         let text = lines.joined(separator: "\n") + "\n"
         DispatchQueue.global(qos: .utility).async {
@@ -953,7 +972,23 @@ final class DragController {
             == config.modifierFlags.intersection(Self.relevantModifiers)
     }
 
-    /// NX device-dependent sub-bits that accompany the coalesced masks; strip
+    /// Where the combo is stripped and where it is not, measured against the
+    /// native hold-⌥ tiling accelerator (macOS's only edge-tiling path when
+    /// "drag to screen edges to tile" is off) and Magnet:
+    ///
+    ///  - MOVE streams keep the held modifiers. The target app never sees a
+    ///    move stream (the overlay owns delivery), so the only readers of its
+    ///    flags are the system's tiling observers — and the ⌥-accelerator
+    ///    reads exactly those flags: an ⌥- or ⌥⌘-flagged drag stream previews
+    ///    AND commits a native tile; a stripped stream never engages it.
+    ///    Magnet snaps either way.
+    ///  - RESIZE streams are stripped: they are delivered to the target
+    ///    window's real resize border, and the app must not see the combo
+    ///    (⌥-resize and friends change app behaviour).
+    ///  - ABORT ups (degrade hand-over, Esc cancel) are stripped: an ⌥-flagged
+    ///    up over an edge would commit the very tile the abort is undoing.
+    ///
+    /// NX device-dependent sub-bits accompany the coalesced masks; strip
     /// them together with their mask so nothing downstream (AppKit's
     /// ctrl-click => context menu, cmd-click handling, ...) sees our modifier.
     private static let deviceBits: [(CGEventFlags, UInt64)] = [

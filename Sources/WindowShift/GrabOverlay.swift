@@ -112,6 +112,8 @@ final class GrabOverlay {
         lock.lock()
         serverConfirmed = false
         lastCG = point
+        showRequestedAt = Date()
+        shownAt = nil
         lock.unlock()
         DispatchQueue.main.async { [self] in
             // The flip uses the PRIMARY screen's height and AppKit's global
@@ -125,9 +127,27 @@ final class GrabOverlay {
             lock.lock()
             shown = true
             windowID = CGWindowID(panel.windowNumber)
+            shownAt = Date()
             lock.unlock()
         }
     }
+
+    /// Diagnostics: why `isReady` is (not) true, safe from any thread.
+    var debugState: String {
+        lock.lock()
+        let s = shown, c = serverConfirmed, w = windowID
+        let requested = showRequestedAt, ran = shownAt
+        lock.unlock()
+        let mainLag = ran.map { Int($0.timeIntervalSince(requested) * 1000) } ?? -1
+        var onscreen = "?"
+        if w != 0 {
+            let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], w) as? [[String: Any]]
+            onscreen = "\((list?.first?[kCGWindowIsOnscreen as String] as? Bool).map(String.init) ?? "absent")"
+        }
+        return "shown=\(s) wid=\(w) confirmed=\(c) onscreen=\(onscreen) mainLagMs=\(mainLag)"
+    }
+    private var showRequestedAt = Date.distantPast
+    private var shownAt: Date?
 
     /// MAIN THREAD ONLY (diagnostics).
     var downsSeen: Int { panel?.downsSeen ?? 0 }
