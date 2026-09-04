@@ -69,14 +69,29 @@ enum WindowResolver {
         let display = displayBounds(containing: point)
         // Half-point outset: a point exactly on a window's edge belongs to it.
         for w in windows where w.bounds.insetBy(dx: -0.5, dy: -0.5).contains(point) {
-            // Display-covering windows at non-normal levels are passive
+            // Windows at non-normal levels that blanket a display are passive
             // click-through overlays (Magnet keeps a resident full-screen
             // snap-preview window at status level 25; notch/annotation
             // utilities do the like). The window server hit-tests past them,
             // so this gate must look past them too or every click on screen
             // gets misattributed to the overlay.
-            if w.layer != 0, w.layer != 3, let display,
-               w.bounds.contains(display.insetBy(dx: 1, dy: 1)) { continue }
+            //
+            // COVERAGE, not exact containment. Demanding that the overlay
+            // contain the whole display reads as the tighter test and silently
+            // breaks: Osaurus keeps a level-25 overlay over the display MINUS
+            // the menu bar, which missed that test by those 40 px, was read as
+            // a real panel, and passed every gesture on that display through.
+            // Magnet's overlay only ever passed by being exactly display-sized.
+            //
+            // There is no exact test to reach for instead. Whether a window is
+            // click-through is a property the window server will not report:
+            // SLSSetWindowEventShape has no getter; SLSGetWindowEventMask reads
+            // the same for a click-through overlay as for a real panel; and
+            // SLSFindWindowByGeometry hit-tests PIXELS, so it looks straight
+            // past an invisible window that does catch clicks (all measured).
+            // Coverage is the honest proxy, and it fails towards passing the
+            // click through, which is the safe direction.
+            if w.layer != 0, w.layer != 3, let display, blankets(display, w.bounds) { continue }
             // Window-server artifacts — drag shadows, tiling-zone previews (which
             // appear whenever Option is held, so any combo containing it sees
             // them) — sit at the maximum window level and linger for a moment
@@ -86,6 +101,18 @@ enum WindowResolver {
             return w
         }
         return nil
+    }
+
+    /// Whether `rect` covers essentially all of `display`. The threshold has to
+    /// clear an overlay that dodges the menu bar (~97% of a display) and one
+    /// that dodges the menu bar and a tall Dock (~88%), while staying far above
+    /// anything a real panel occupies — Osaurus's own level-25 panel is 14%.
+    private static func blankets(_ display: CGRect, _ rect: CGRect) -> Bool {
+        let area = display.width * display.height
+        guard area > 0 else { return false }
+        let covered = display.intersection(rect)
+        guard !covered.isNull else { return false }
+        return covered.width * covered.height >= 0.8 * area
     }
 
     static func displayBounds(containing p: CGPoint) -> CGRect? {

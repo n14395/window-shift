@@ -30,10 +30,11 @@ private final class CountingPanel: NSPanel {
 ///    server deliberately hit-tests PAST display-covering windows at high
 ///    levels (that is how Magnet's resident full-screen overlay stays
 ///    click-through), so a desktop-sized panel absorbs nothing at any alpha.
-///    Snap-on-drag apps also attribute a drag to the window at the mouse-down
-///    point while SKIPPING implausibly tiny ones: at 40 px the overlay is
-///    ignored and the target beneath is attributed (snapping works); at 60 px
-///    the overlay is attributed and, since it never moves, nothing ever snaps.
+///    Size buys nothing towards snapping interop in either direction: every
+///    size from 4 px up is found by a snapper's hit test, and what actually
+///    decides whether snapping survives is where our tap sits in the chain
+///    (see `EventTap`). Small is only so the parked panel is not a dead spot
+///    on the user's desktop.
 ///  - **It is placed by the window server, from the event-tap thread.**
 ///    `SLSMoveWindow` on our own window takes effect synchronously, so by the
 ///    time the tap emits the mouse-down the panel is provably under it. The
@@ -56,9 +57,10 @@ private final class CountingPanel: NSPanel {
 ///    keeps a window-server identity to be moved by. The panel draws nothing
 ///    visible, so appearing in a screenshot is moot.
 ///
-/// Between gestures the panel stays on screen but click-through, so it never
-/// swallows a real click; ordering it out and back in is what used to cost
-/// the main-thread stall, so it is never ordered out at all.
+/// Between gestures the panel is parked with a single pixel showing in the
+/// bottom-left corner of the primary display, never ordered out: it is always
+/// able to catch a click (see `makePanel`), and ordering it out and back in is
+/// what used to cost a main-thread stall of up to a second.
 final class GrabOverlay {
     /// See the type comment.
     static let size: CGFloat = 40
@@ -79,7 +81,8 @@ final class GrabOverlay {
             // On screen because a window parked off every display drops out
             // of the window list for several moves (measured); one pixel
             // because the panel is always able to catch a click, so anything
-            // larger would be a dead spot in the user's desktop.
+            // larger would be a dead spot in the user's desktop. The panel is
+            // BORN here (see `makePanel`), so this is where it already is.
             parkOrigin = CGPoint(x: -(Self.size - 1), y: primaryHeight - 1)
         }
         lock.unlock()
@@ -120,19 +123,24 @@ final class GrabOverlay {
         let wid = windowID
         let park = parkOrigin
         lock.unlock()
-        if wid != 0 { SkyLight.move(window: wid, toTopLeft: park) }
+        guard wid != 0, let park else { return }
+        SkyLight.move(window: wid, toTopLeft: park)
     }
 
     /// Gesture over: back to the parking spot.
     func disarm() { park() }
 
-    /// Somewhere on screen — the panel has to stay registered with the window
+    /// The parking spot in CG (top-left origin) coordinates, resolved in
+    /// `prepare` once the screen geometry is known. Nil until then, and a nil
+    /// park moves nothing: parking to a default (0, 0) would strand the panel
+    /// in the TOP-left corner, which is a live dead spot rather than a corner
+    /// the panel only has one pixel in.
+    ///
+    /// Somewhere ON screen — the panel has to stay registered with the window
     /// server, and parking it off every display drops it out of the window
     /// list for several moves (measured), which is the latency this whole
-    /// design exists to avoid. The bottom-left corner of the primary display
-    /// is as harmless as anywhere: the panel is click-through whenever it is
-    /// parked here, and it is moved here BEFORE the flip, never after.
-    private var parkOrigin = CGPoint(x: 0, y: 0)
+    /// design exists to avoid.
+    private var parkOrigin: CGPoint?
 
     /// MAIN THREAD ONLY. Diagnostic: how many clicks the panel has caught.
     var downsSeen: Int { panel?.downsSeen ?? 0 }
@@ -142,15 +150,28 @@ final class GrabOverlay {
     var isArmed: Bool { true }
 
     private func makePanel() -> CountingPanel {
+        // BORN at the parking spot, not at the origin and moved there.
+        // `prepare` orders the panel front and parks it in one run-loop turn,
+        // but AppKit commits the window to the server at the END of that turn,
+        // with the frame the panel was CREATED with — so the park landed on a
+        // window the server did not have yet and was then undone. Measured: the
+        // panel sat at its birth position for the whole session, a 40×40
+        // click-catching square in the bottom-left of the primary display.
+        // Birth spot == park spot removes the race, and also survives any later
+        // AppKit re-commit (a screen-parameter change re-sends the frame AppKit
+        // has cached, which the SkyLight moves never update).
+        //
+        // AppKit's origin is the bottom-left of the primary display and its y
+        // runs up, so this is the same point as `parkOrigin` in CG coordinates,
+        // with one pixel of the panel on screen. AppKit does not constrain a
+        // borderless panel born off-screen (measured).
+        let park = NSRect(x: -(Self.size - 1), y: -(Self.size - 1),
+                          width: Self.size, height: Self.size)
         let panel = CountingPanel(
-            contentRect: NSRect(x: 0, y: 0, width: Self.size, height: Self.size),
+            contentRect: park,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false
         )
-        // Above EVERYTHING. `.statusBar` (25) is not enough: Magnet parks a
-        // resident full-display overlay at exactly that level, and when it wins
-        // the tie the synthetic down lands on Magnet's window instead of ours.
-        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
@@ -163,6 +184,16 @@ final class GrabOverlay {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
+        // Above EVERYTHING, and set AFTER `isFloatingPanel` — that property
+        // resets the level to `.floating` (3), so assigning the level first
+        // threw the assignment away. Measured: the panel ran at layer 3, below
+        // every level-25 overlay on screen, and caught its press only because
+        // the overlays up there happen to be click-through. `.statusBar` (25)
+        // is where Magnet parks a resident full-display overlay; a
+        // click-catching window at that level would take the synthetic down
+        // instead of us. This level also puts the panel inside the band
+        // `WindowResolver` ignores, so a gesture can never target it.
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
         // No fade on order-in: it would run an NSAnimation and fence against
         // the window server for no visible benefit — the panel is transparent.
         panel.animationBehavior = .none
