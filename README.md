@@ -108,7 +108,7 @@ ignored.
 
 ![The WindowShift menu: master toggle, the Trigger On chips with ⌃ and ⌘ lit, the last-drag line, and the Settings section expanded](docs/04-menu.png)
 
-Everything is a key in the `dev.nwf.WindowShift` defaults domain. The app
+Everything is a key in the `com.n14395.WindowShift` defaults domain. The app
 observes the domain, so `defaults write` changes apply instantly — no relaunch.
 
 | Key | Default | Meaning |
@@ -121,9 +121,9 @@ observes the domain, so `defaults write` changes apply instantly — no relaunch
 | `showMenuBarIcon` | `true` | Menu bar icon visibility |
 
 ```sh
-defaults write dev.nwf.WindowShift modifiers -string "ctrl,opt,cmd"
-defaults write dev.nwf.WindowShift magneticSnapDistance -float 8
-defaults write dev.nwf.WindowShift disabledApps -array "com.apple.finder"
+defaults write com.n14395.WindowShift modifiers -string "ctrl,opt,cmd"
+defaults write com.n14395.WindowShift magneticSnapDistance -float 8
+defaults write com.n14395.WindowShift disabledApps -array "com.apple.finder"
 ```
 
 `magneticSnapDistance` and `resizeInset` have no menu equivalent yet — set them

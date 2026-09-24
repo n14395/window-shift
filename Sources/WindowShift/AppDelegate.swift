@@ -460,7 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
                 To bring the icon back, open WindowShift again (Spotlight, \
                 Launchpad, or Finder), or run:
-                defaults write dev.nwf.WindowShift showMenuBarIcon -bool true
+                defaults write com.n14395.WindowShift showMenuBarIcon -bool true
                 """
             alert.addButton(withTitle: "Hide Icon")
             alert.addButton(withTitle: "Cancel")
@@ -487,7 +487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             To bring the icon back, open WindowShift again (Spotlight, \
             Launchpad, or Finder), or run:
-            defaults write dev.nwf.WindowShift showMenuBarIcon -bool true
+            defaults write com.n14395.WindowShift showMenuBarIcon -bool true
             """
         alert.addButton(withTitle: "OK")
         if offerUndo {
