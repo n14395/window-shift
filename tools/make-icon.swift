@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 // Renders the WindowShift app icon (1024x1024 PNG) with CoreGraphics.
 // Usage: swift tools/make-icon.swift <output.png>
 // Regenerate the .icns after changing this: see tools/make-icon.sh

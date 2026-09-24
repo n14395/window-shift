@@ -218,3 +218,8 @@ WindowManager.framework tiling internals. The window-server drag call was found
 by probing SkyLight directly, and the interop with snapping apps was worked out
 by reading Magnet's imported symbols and event-tap mask to see how it decides
 which window a drag belongs to.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+Third-party attribution is in [NOTICE](NOTICE).

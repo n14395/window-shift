@@ -1,0 +1,28 @@
+WindowShift
+Copyright 2026 Nick Fay
+
+Licensed under the Apache License, Version 2.0 (the "License").
+You may obtain a copy of the License in the LICENSE file distributed
+with this work, or at http://www.apache.org/licenses/LICENSE-2.0
+
+
+This product includes third-party software, listed below with the
+attribution its licence requires.
+
+------------------------------------------------------------------------
+Sparkle
+------------------------------------------------------------------------
+Sparkle (https://github.com/sparkle-project/Sparkle) provides application
+updates. Distributed under the MIT License.
+
+  Copyright (c) 2006-2013 Andy Matuschak.
+  Copyright (c) 2009-2013 Elgato Systems GmbH.
+  Copyright (c) 2011-2014 Kornel Lesinski.
+  Copyright (c) 2015-2017 Mayur Pawashe.
+  Copyright (c) 2014 C.W. Betts.
+  Copyright (c) 2014 Petroules Corporation.
+  Copyright (c) 2014 Big Nerd Ranch.
+  All rights reserved.
+
+Sparkle also incorporates further components under their own terms; the
+complete licence text ships with the framework.
