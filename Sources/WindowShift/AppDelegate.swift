@@ -45,6 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: ["enabled": true, "showMenuBarIcon": true])
+        #if SPARKLE
+        SparkleUpdater.start()
+        #endif
         // One-time cleanup of keys left behind by removed features. The
         // handoff/title-bar settings went with the move mechanism they tuned:
         // the drag is bound to a window ID now, so there is no grab offset to
@@ -181,6 +184,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         disabledItem.submenu = disabledAppsMenu
         settingsItems.append(disabledItem)
         menu.addItem(disabledItem)
+
+        #if SPARKLE
+        // Lives in the collapsible Settings section, below Disabled Apps.
+        let updateRow = SettingRowView(title: "Check for Updates…", symbol: "arrow.down.circle")
+        updateRow.onClick = { [weak self] in
+            self?.statusItem.menu?.cancelTracking()
+            MainActor.assumeIsolated { SparkleUpdater.shared.checkForUpdates() }
+        }
+        let updateItem = viewItem(updateRow)
+        settingsItems.append(updateItem)
+        menu.addItem(updateItem)
+        #endif
 
         menu.addItem(.separator())
 

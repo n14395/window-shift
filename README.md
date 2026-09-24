@@ -10,6 +10,8 @@ everything that hooks into real drags still works.
 
 <!-- TODO: demo GIF — drag from window body → native tile preview → Esc cancel -->
 
+![A Finder window being dragged from the middle of its content; the window behind it has not moved](docs/01-drag-from-anywhere.png)
+
 ## Features
 
 - **Snap apps just work** — verified against Magnet; the mechanism is generic,
@@ -94,6 +96,8 @@ The menu bar icon covers the everyday things: master on/off, trigger combo,
 launch at login, hiding the icon, and per-app exclusions. It also shows a
 **Last drag:** line explaining what the most recent gesture did, or why it was
 ignored.
+
+![The WindowShift menu: master toggle, the Trigger On chips with ⌃ and ⌘ lit, the last-drag line, and the Settings section expanded](docs/04-menu.png)
 
 Everything is a key in the `dev.nwf.WindowShift` defaults domain. The app
 observes the domain, so `defaults write` changes apply instantly — no relaunch.
