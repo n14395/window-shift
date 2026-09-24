@@ -38,8 +38,13 @@ work.
 
 ## Install
 
-Download the latest `.dmg` from [Releases](../../releases), drag WindowShift to
-Applications, and launch it.
+```sh
+brew tap n14395/tap
+brew install --cask window-shift
+```
+
+Or download the latest `.dmg` from [Releases](../../releases), drag WindowShift
+to Applications, and launch it.
 
 It asks for two permissions on first run, both under **System Settings →
 Privacy & Security**:
