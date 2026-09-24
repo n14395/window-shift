@@ -1,4 +1,8 @@
-# WindowShift
+<p align="center">
+  <img src="app-icon.png" alt="WindowShift app icon" width="160">
+</p>
+
+<h1 align="center">WindowShift</h1>
 
 **Move and resize any macOS window from anywhere on it — with native tiling intact.**
 
